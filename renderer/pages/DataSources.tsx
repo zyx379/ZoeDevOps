@@ -1,5 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useProjectStore, Project, ProjectConfig, CodeRepository } from '../stores/projectStore';
+import {
+  validateDsForm,
+  isDsFormValid,
+  mapDataSourceSaveError,
+  type DsFormErrors,
+} from '../utils/dsFormValidation';
 
 type TabType = 'projects' | 'datasource' | 'config' | 'code-repos' | 'ai-config';
 
@@ -46,6 +52,10 @@ function DataSources() {
   });
 
   const [dsModalOpen, setDsModalOpen] = useState(false);
+  const [isEditingDs, setIsEditingDs] = useState(false);
+  const [dsFormTouched, setDsFormTouched] = useState(false);
+  const [dsFormErrors, setDsFormErrors] = useState<DsFormErrors>({});
+  const [dsToast, setDsToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [dsForm, setDsForm] = useState({
     name: '',
     type: 'oracle' as 'oracle' | 'dameng',
@@ -213,8 +223,54 @@ function DataSources() {
     }
   };
 
-  const handleOpenDsModal = () => {
+  const dsValidationErrors = useMemo(() => validateDsForm(dsForm), [dsForm]);
+  const dsFormValid = isDsFormValid(dsValidationErrors);
+
+  const showDsToast = (message: string, type: 'success' | 'error') => {
+    setDsToast({ message, type });
+    setTimeout(() => setDsToast(null), 3000);
+  };
+
+  const handleOpenDsModal = (editing = false) => {
+    const isEdit = editing || !!activeDataSource;
+    setIsEditingDs(isEdit);
+    setDsFormTouched(false);
+    setDsFormErrors({});
+    setTestResult(null);
+
+    if (isEdit && activeDataSource) {
+      setDsForm({
+        name: activeDataSource.name || '',
+        type: activeDataSource.type || 'oracle',
+        host: activeDataSource.host || 'localhost',
+        port: activeDataSource.port || 1521,
+        sid: activeDataSource.sid || '',
+        serviceName: activeDataSource.serviceName || '',
+        schema: activeDataSource.schema || '',
+        username: activeDataSource.username || '',
+        password: activeDataSource.password || '',
+      });
+    } else {
+      setDsForm({
+        name: '',
+        type: 'oracle',
+        host: 'localhost',
+        port: 1521,
+        sid: '',
+        serviceName: '',
+        schema: '',
+        username: '',
+        password: '',
+      });
+    }
     setDsModalOpen(true);
+  };
+
+  const closeDsModal = () => {
+    setDsModalOpen(false);
+    setTestResult(null);
+    setDsFormTouched(false);
+    setDsFormErrors({});
   };
 
   const handleTestDsConnection = async () => {
@@ -231,21 +287,50 @@ function DataSources() {
 
   const handleSaveDs = async () => {
     if (!activeProject) return;
+
+    setDsFormTouched(true);
+    const errors = validateDsForm(dsForm);
+    setDsFormErrors(errors);
+    if (!isDsFormValid(errors)) return;
+
     setSaving(true);
     try {
+      const connResult = await testDataSourceConnection(dsForm);
+      if (!connResult.success) {
+        const proceed = confirm('连接测试未通过，是否仍要保存？');
+        if (!proceed) {
+          setTestResult(connResult);
+          setSaving(false);
+          return;
+        }
+      }
+
       await createOrUpdateDataSource({
         projectId: activeProject.id,
         ...dsForm,
       });
-      // 重新加载项目详情，确保最新的数据源信息同步到 store
       await loadActiveProjectDetails();
-      setDsModalOpen(false);
-      setTestResult(null);
+      closeDsModal();
+      showDsToast(isEditingDs ? '数据源更新成功' : '数据源保存成功', 'success');
     } catch (error) {
       console.error('Failed to save data source:', error);
+      showDsToast(mapDataSourceSaveError(error), 'error');
     }
     setSaving(false);
   };
+
+  const updateDsForm = (patch: Partial<typeof dsForm>) => {
+    setDsForm((prev) => {
+      const next = { ...prev, ...patch };
+      if (dsFormTouched) {
+        setDsFormErrors(validateDsForm(next));
+      }
+      return next;
+    });
+  };
+
+  const fieldError = (key: keyof DsFormErrors) =>
+    dsFormTouched ? dsFormErrors[key] || dsValidationErrors[key] : undefined;
 
   const handleDeleteDs = async () => {
     if (!activeDataSource) return;
@@ -387,6 +472,17 @@ function DataSources() {
 
   return (
     <div className="space-y-6">
+      {dsToast && (
+        <div
+          className={`fixed top-4 right-4 z-[60] px-4 py-3 rounded-lg shadow-lg text-sm text-white ${
+            dsToast.type === 'success' ? 'bg-green-600' : 'bg-red-600'
+          }`}
+          role="status"
+        >
+          {dsToast.message}
+        </div>
+      )}
+
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold">项目管理</h2>
         {activeTab === 'projects' && (
@@ -539,7 +635,7 @@ function DataSources() {
                     <h3 className="text-lg font-semibold">数据源配置</h3>
                     <div className="flex gap-2">
                       <button
-                        onClick={() => setDsModalOpen(true)}
+                        onClick={() => handleOpenDsModal(true)}
                         className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-medium"
                       >
                         编辑
@@ -1082,7 +1178,7 @@ function DataSources() {
       {dsModalOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            <h3 className="text-xl font-semibold mb-6">数据源配置</h3>
+            <h3 className="text-xl font-semibold mb-6">{isEditingDs ? '编辑数据源' : '配置数据源'}</h3>
             
             <div className="space-y-6">
               <div>
@@ -1091,9 +1187,12 @@ function DataSources() {
                   type="text"
                   required
                   value={dsForm.name}
-                  onChange={(e) => setDsForm({ ...dsForm, name: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  onChange={(e) => updateDsForm({ name: e.target.value })}
+                  className={`w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                    fieldError('name') ? 'border-red-400' : 'border-gray-300'
+                  }`}
                 />
+                {fieldError('name') && <p className="mt-1 text-xs text-red-600">{fieldError('name')}</p>}
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -1101,30 +1200,37 @@ function DataSources() {
                   <label className="block text-sm font-medium text-gray-700 mb-1">数据库类型</label>
                   <select
                     value={dsForm.type}
-                    onChange={(e) => setDsForm({ ...dsForm, type: e.target.value as 'oracle' | 'dameng' })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    disabled={isEditingDs}
+                    onChange={(e) => updateDsForm({ type: e.target.value as 'oracle' | 'dameng' })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
                   >
                     <option value="oracle">Oracle</option>
                     <option value="dameng">达梦</option>
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">主机地址</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">主机地址 *</label>
                   <input
                     type="text"
                     value={dsForm.host}
-                    onChange={(e) => setDsForm({ ...dsForm, host: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    onChange={(e) => updateDsForm({ host: e.target.value })}
+                    className={`w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                      fieldError('host') ? 'border-red-400' : 'border-gray-300'
+                    }`}
                   />
+                  {fieldError('host') && <p className="mt-1 text-xs text-red-600">{fieldError('host')}</p>}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">端口</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">端口 *</label>
                   <input
                     type="number"
                     value={dsForm.port}
-                    onChange={(e) => setDsForm({ ...dsForm, port: parseInt(e.target.value) || 1521 })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    onChange={(e) => updateDsForm({ port: parseInt(e.target.value, 10) || 0 })}
+                    className={`w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                      fieldError('port') ? 'border-red-400' : 'border-gray-300'
+                    }`}
                   />
+                  {fieldError('port') && <p className="mt-1 text-xs text-red-600">{fieldError('port')}</p>}
                 </div>
                 
                 {dsForm.type === 'oracle' ? (
@@ -1134,7 +1240,7 @@ function DataSources() {
                       <input
                         type="text"
                         value={dsForm.sid}
-                        onChange={(e) => setDsForm({ ...dsForm, sid: e.target.value })}
+                        onChange={(e) => updateDsForm({ sid: e.target.value })}
                         className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                       />
                     </div>
@@ -1143,40 +1249,56 @@ function DataSources() {
                       <input
                         type="text"
                         value={dsForm.serviceName}
-                        onChange={(e) => setDsForm({ ...dsForm, serviceName: e.target.value })}
+                        onChange={(e) => updateDsForm({ serviceName: e.target.value })}
                         className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                       />
                     </div>
                   </>
                 ) : (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">数据库名称</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">数据库名称 *</label>
                     <input
                       type="text"
                       value={dsForm.schema}
-                      onChange={(e) => setDsForm({ ...dsForm, schema: e.target.value })}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      onChange={(e) => updateDsForm({ schema: e.target.value })}
+                      className={`w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                        fieldError('schema') ? 'border-red-400' : 'border-gray-300'
+                      }`}
                     />
+                    {fieldError('schema') && <p className="mt-1 text-xs text-red-600">{fieldError('schema')}</p>}
+                  </div>
+                )}
+
+
+                {dsForm.type === 'oracle' && fieldError('oracleConn') && (
+                  <div className="md:col-span-2">
+                    <p className="text-xs text-red-600">{fieldError('oracleConn')}</p>
                   </div>
                 )}
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">用户名</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">用户名 *</label>
                   <input
                     type="text"
                     value={dsForm.username}
-                    onChange={(e) => setDsForm({ ...dsForm, username: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    onChange={(e) => updateDsForm({ username: e.target.value })}
+                    className={`w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                      fieldError('username') ? 'border-red-400' : 'border-gray-300'
+                    }`}
                   />
+                  {fieldError('username') && <p className="mt-1 text-xs text-red-600">{fieldError('username')}</p>}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">密码</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">密码 *</label>
                   <input
                     type="password"
                     value={dsForm.password}
-                    onChange={(e) => setDsForm({ ...dsForm, password: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    onChange={(e) => updateDsForm({ password: e.target.value })}
+                    className={`w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                      fieldError('password') ? 'border-red-400' : 'border-gray-300'
+                    }`}
                   />
+                  {fieldError('password') && <p className="mt-1 text-xs text-red-600">{fieldError('password')}</p>}
                 </div>
               </div>
 
@@ -1198,17 +1320,17 @@ function DataSources() {
 
               <div className="flex justify-end space-x-4 pt-4 border-t">
                 <button
-                  onClick={() => { setDsModalOpen(false); setTestResult(null); }}
+                  onClick={closeDsModal}
                   className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                 >
                   取消
                 </button>
                 <button
                   onClick={handleSaveDs}
-                  disabled={saving || !dsForm.name.trim() || !dsForm.username.trim()}
+                  disabled={saving || !dsFormValid}
                   className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 transition-colors"
                 >
-                  {saving ? '保存中...' : '保存'}
+                  {saving ? '保存中...' : isEditingDs ? '更新' : '保存'}
                 </button>
               </div>
             </div>

@@ -165,18 +165,20 @@ export const useProjectStore = create<ProjectStore>()(
       },
 
       createOrUpdateDataSource: async (ds) => {
-        // 先检查该项目是否已有数据源
-        const existingDataSource = await (window.electronAPI as any).project.getDataSource(ds.projectId);
-        let saved;
-        
-        if (existingDataSource) {
-          // 已有数据源，执行更新
-          saved = await (window.electronAPI as any).project.updateDataSource(existingDataSource.id, ds);
+        const { activeDataSource } = get();
+        let existingId: string | undefined;
+
+        if (activeDataSource?.projectId === ds.projectId) {
+          existingId = activeDataSource.id;
         } else {
-          // 没有数据源，执行创建
-          saved = await (window.electronAPI as any).project.createDataSource(ds);
+          const existingDataSource = await (window.electronAPI as any).project.getDataSource(ds.projectId);
+          existingId = existingDataSource?.id;
         }
-        
+
+        const saved = existingId
+          ? await (window.electronAPI as any).project.updateDataSource(existingId, ds)
+          : await (window.electronAPI as any).project.createDataSource(ds);
+
         set({ activeDataSource: saved });
         return saved;
       },

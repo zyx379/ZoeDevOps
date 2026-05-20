@@ -68,6 +68,9 @@ const api = {
         getTemplates: (projectId) => electron_1.ipcRenderer.invoke('report:getTemplates', projectId),
         saveTemplate: (tpl) => electron_1.ipcRenderer.invoke('report:saveTemplate', tpl),
         deleteTemplate: (id) => electron_1.ipcRenderer.invoke('report:deleteTemplate', id),
+        getTableHeat: (dataSourceId) => electron_1.ipcRenderer.invoke('report:getTableHeat', dataSourceId),
+        deleteTableHeat: (id) => electron_1.ipcRenderer.invoke('report:deleteTableHeat', id),
+        clearTableHeat: (dataSourceId) => electron_1.ipcRenderer.invoke('report:clearTableHeat', dataSourceId),
         parseExcel: (base64, fileName) => electron_1.ipcRenderer.invoke('report:parseExcel', base64, fileName),
         onStreamChunk: (callback) => {
             const handler = (_, data) => callback(data);

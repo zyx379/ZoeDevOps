@@ -57,9 +57,10 @@ export class ReportSession {
 
   async sendMessage(
     userMessage: string,
-    onChunk: (content: string) => void
+    onChunk: (content: string) => void,
+    selectedTables: string[] = []
   ): Promise<{ content: string }> {
-    const schemaCtx = buildSchemaContextForAI(this.context.dataSourceId, userMessage);
+    const schemaCtx = buildSchemaContextForAI(this.context.dataSourceId, userMessage, selectedTables);
     const rels = getTableRelationshipsByDs(this.context.dataSourceId).filter((r) => r.isValid === 1);
     const relText =
       rels.length > 0

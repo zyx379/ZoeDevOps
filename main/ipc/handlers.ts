@@ -63,7 +63,12 @@ import {
   getReportTemplates,
   saveReportTemplate,
   deleteReportTemplate,
+  getTableHeat,
+  bumpTableHeat,
+  deleteTableHeat,
+  clearTableHeat,
 } from '../database/reportStorage';
+import { extractTableNamesFromSql } from '../report/tableNames';
 
 let currentAbortController: AbortController | null = null;
 const chatSessions = new Map<string, ChatSession>();
@@ -367,6 +372,7 @@ export function registerIpcHandlers() {
         dataSourceId,
         dataSourceName: dataSource.name,
       });
+      bumpTableHeat(dataSourceId, extractTableNamesFromSql(sql), 'query');
 
       return result;
     } catch (error) {
@@ -759,6 +765,7 @@ export function registerIpcHandlers() {
         dataSourceId,
         dataSourceName: dataSource.name,
       });
+      bumpTableHeat(dataSourceId, extractTableNamesFromSql(sql), 'query');
 
       return result;
     } catch (error) {
@@ -895,6 +902,7 @@ export function registerIpcHandlers() {
     dbType: 'oracle' | 'dameng';
     message: string;
     resetSession?: boolean;
+    selectedTables?: string[];
   }) => {
     try {
       const globalConfig = getGlobalConfig();
@@ -917,9 +925,13 @@ export function registerIpcHandlers() {
         throw new Error('未找到主窗口');
       }
 
-      const result = await session.sendMessage(params.message, (chunk) => {
-        mainWindow.webContents.send('report:streamChunk', { sessionKey: params.sessionKey, chunk });
-      });
+      const result = await session.sendMessage(
+        params.message,
+        (chunk) => {
+          mainWindow.webContents.send('report:streamChunk', { sessionKey: params.sessionKey, chunk });
+        },
+        params.selectedTables || []
+      );
 
       return {
         success: true,
@@ -946,6 +958,7 @@ export function registerIpcHandlers() {
         dbType: params.dbType,
       });
       const result = await session.executeSelect(params.sql);
+      bumpTableHeat(params.dataSourceId, extractTableNamesFromSql(params.sql), 'report');
       return { success: true, ...result };
     } catch (error) {
       return { success: false, message: (error as Error).message };
@@ -1030,6 +1043,20 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('report:deleteTemplate', async (_event, id: string) => {
     deleteReportTemplate(id);
+    return { success: true };
+  });
+
+  ipcMain.handle('report:getTableHeat', async (_event, dataSourceId: string) => {
+    return getTableHeat(dataSourceId);
+  });
+
+  ipcMain.handle('report:deleteTableHeat', async (_event, id: string) => {
+    deleteTableHeat(id);
+    return { success: true };
+  });
+
+  ipcMain.handle('report:clearTableHeat', async (_event, dataSourceId: string) => {
+    clearTableHeat(dataSourceId);
     return { success: true };
   });
 

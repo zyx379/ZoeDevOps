@@ -43,6 +43,18 @@ export interface ReportTemplateRecord {
   updatedAt: string;
 }
 
+export interface TableHeatRecord {
+  id: string;
+  dataSourceId: string;
+  tableName: string;
+  queryCount: number;
+  reportCount: number;
+  manualWeight: number;
+  lastUsedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export function initReportTables(): void {
   const db = getDb();
   db.run(`
@@ -92,6 +104,23 @@ export function initReportTables(): void {
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL
     )
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS table_heat (
+      id TEXT PRIMARY KEY,
+      dataSourceId TEXT NOT NULL,
+      tableName TEXT NOT NULL,
+      queryCount INTEGER DEFAULT 0,
+      reportCount INTEGER DEFAULT 0,
+      manualWeight INTEGER DEFAULT 0,
+      lastUsedAt TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      UNIQUE(dataSourceId, tableName)
+    )
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_table_heat_ds ON table_heat(dataSourceId)
   `);
   saveDatabase();
 }
@@ -293,5 +322,99 @@ export function saveReportTemplate(
 
 export function deleteReportTemplate(id: string): void {
   getDb().run('DELETE FROM report_templates WHERE id = ?', [id]);
+  saveDatabase();
+}
+
+function rowToHeatRecord(row: unknown[]): TableHeatRecord {
+  return {
+    id: row[0] as string,
+    dataSourceId: row[1] as string,
+    tableName: row[2] as string,
+    queryCount: Number(row[3] || 0),
+    reportCount: Number(row[4] || 0),
+    manualWeight: Number(row[5] || 0),
+    lastUsedAt: (row[6] as string) || '',
+    createdAt: row[7] as string,
+    updatedAt: row[8] as string,
+  };
+}
+
+export function getTableHeat(dataSourceId: string): TableHeatRecord[] {
+  const db = getDb();
+  const stmt = db.prepare(
+    `SELECT id, dataSourceId, tableName, queryCount, reportCount, manualWeight, lastUsedAt, createdAt, updatedAt
+     FROM table_heat
+     WHERE dataSourceId = ?
+     ORDER BY (queryCount + reportCount * 3 + manualWeight) DESC, updatedAt DESC`
+  );
+  stmt.bind([dataSourceId]);
+  const rows: TableHeatRecord[] = [];
+  while (stmt.step()) {
+    rows.push(rowToHeatRecord(stmt.get()));
+  }
+  stmt.free();
+  return rows;
+}
+
+export function getTableHeatMap(dataSourceId: string): Map<string, TableHeatRecord> {
+  return new Map(getTableHeat(dataSourceId).map((r) => [r.tableName.toUpperCase(), r]));
+}
+
+export function bumpTableHeat(
+  dataSourceId: string,
+  tableNames: string[],
+  source: 'query' | 'report',
+  amount = 1
+): void {
+  const unique = Array.from(new Set(tableNames.map((t) => t.trim()).filter(Boolean)));
+  if (unique.length === 0) return;
+
+  const db = getDb();
+  const now = new Date().toISOString();
+  for (const tableName of unique) {
+    const stmt = db.prepare(
+      `SELECT id, queryCount, reportCount, manualWeight, createdAt
+       FROM table_heat
+       WHERE dataSourceId = ? AND UPPER(tableName) = UPPER(?)`
+    );
+    stmt.bind([dataSourceId, tableName]);
+    if (stmt.step()) {
+      const row = stmt.get();
+      stmt.free();
+      const queryCount = Number(row[1] || 0) + (source === 'query' ? amount : 0);
+      const reportCount = Number(row[2] || 0) + (source === 'report' ? amount : 0);
+      db.run(
+        `UPDATE table_heat SET queryCount = ?, reportCount = ?, lastUsedAt = ?, updatedAt = ? WHERE id = ?`,
+        [queryCount, reportCount, now, now, row[0]]
+      );
+    } else {
+      db.run(
+        `INSERT INTO table_heat (id, dataSourceId, tableName, queryCount, reportCount, manualWeight, lastUsedAt, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          dataSourceId,
+          tableName,
+          source === 'query' ? amount : 0,
+          source === 'report' ? amount : 0,
+          0,
+          now,
+          now,
+          now,
+        ]
+      );
+      stmt.free();
+    }
+  }
+  saveDatabase();
+}
+
+export function deleteTableHeat(id: string): void {
+  getDb().run('DELETE FROM table_heat WHERE id = ?', [id]);
+  saveDatabase();
+}
+
+export function clearTableHeat(dataSourceId: string): void {
+  getDb().run('DELETE FROM table_heat WHERE dataSourceId = ?', [dataSourceId]);
   saveDatabase();
 }

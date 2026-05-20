@@ -6,6 +6,7 @@ export interface ReportMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  timestamp?: number;
   sql?: string;
   queryResult?: QueryResultData;
   chartType?: ChartType;
@@ -39,7 +40,7 @@ interface ReportState {
   currentTitle: string;
   currentChartType: ChartType;
   currentQueryResult: QueryResultData | null;
-  leftPanelTab: 'history' | 'templates' | 'relationships';
+  leftPanelTab: 'history' | 'templates' | 'relationships' | 'tables';
   searchKeyword: string;
 
   setFormDescription: (v: string) => void;
@@ -47,13 +48,15 @@ interface ReportState {
   setMessages: (msgs: ReportMessage[]) => void;
   addMessage: (msg: ReportMessage) => void;
   updateLastAssistantMessage: (content: string) => void;
+  removeMessagePair: (assistantId: string) => void;
+  replaceAssistantMessage: (assistantId: string, content: string) => void;
   setCurrentRecordId: (id: string | null) => void;
   setReportRecords: (records: ReportRecord[]) => void;
   setCurrentSql: (sql: string | null) => void;
   setCurrentTitle: (title: string) => void;
   setCurrentChartType: (t: ChartType) => void;
   setCurrentQueryResult: (r: QueryResultData | null) => void;
-  setLeftPanelTab: (t: 'history' | 'templates' | 'relationships') => void;
+  setLeftPanelTab: (t: 'history' | 'templates' | 'relationships' | 'tables') => void;
   setSearchKeyword: (k: string) => void;
   newSession: () => void;
   loadFromRecord: (record: ReportRecord) => void;
@@ -90,6 +93,20 @@ export const useReportStore = create<ReportState>()(
           }
           return { messages: msgs };
         }),
+      removeMessagePair: (assistantId) =>
+        set((s) => {
+          const idx = s.messages.findIndex((m) => m.id === assistantId);
+          if (idx < 0) return s;
+          const removeAt = new Set<number>([idx]);
+          if (idx > 0 && s.messages[idx - 1].role === 'user') {
+            removeAt.add(idx - 1);
+          }
+          return { messages: s.messages.filter((_, i) => !removeAt.has(i)) };
+        }),
+      replaceAssistantMessage: (assistantId, content) =>
+        set((s) => ({
+          messages: s.messages.map((m) => (m.id === assistantId ? { ...m, content } : m)),
+        })),
       setCurrentRecordId: (id) => set({ currentRecordId: id }),
       setReportRecords: (records) => set({ reportRecords: records }),
       setCurrentSql: (sql) => set({ currentSql: sql }),

@@ -208,6 +208,9 @@ export interface ElectronAPI {
         getTemplates: (projectId: string) => Promise<any[]>;
         saveTemplate: (tpl: any) => Promise<any>;
         deleteTemplate: (id: string) => Promise<any>;
+        getTableHeat: (dataSourceId: string) => Promise<any[]>;
+        deleteTableHeat: (id: string) => Promise<any>;
+        clearTableHeat: (dataSourceId: string) => Promise<any>;
         parseExcel: (base64: string, fileName: string) => Promise<any>;
         onStreamChunk: (callback: (data: {
             sessionKey: string;

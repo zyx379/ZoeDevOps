@@ -15,6 +15,92 @@ import {
   ChartType,
 } from '../utils/reportUtils';
 
+function ThinkingDots() {
+  return (
+    <span className="inline-flex items-center gap-1 text-gray-500 text-sm">
+      思考中
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="inline-block h-1.5 w-1.5 rounded-full bg-gray-400 animate-bounce"
+          style={{ animationDelay: `${i * 0.15}s` }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function formatMessageTime(msg: ReportMessage): string {
+  const ts =
+    msg.timestamp ??
+    (() => {
+      const m = msg.id.match(/msg_(\d+)/);
+      return m ? Number(m[1]) : Date.now();
+    })();
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function SendIcon() {
+  return (
+    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M13 5l7 7-7 7" />
+    </svg>
+  );
+}
+
+function SpinnerIcon() {
+  return (
+    <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden>
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+      />
+    </svg>
+  );
+}
+
+function CollapsibleAssistantContent({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const plain = content.replace(/```[\s\S]*?```/g, '').trim();
+  const shouldCollapse = plain.length > 500;
+
+  if (!shouldCollapse) {
+    return <MarkdownContent content={content} />;
+  }
+
+  const preview = plain.slice(0, 200);
+  return (
+    <div>
+      {expanded ? (
+        <>
+          <MarkdownContent content={content} />
+          <button
+            type="button"
+            onClick={() => setExpanded(false)}
+            className="mt-2 text-xs text-blue-600 hover:text-blue-800"
+          >
+            收起 ▲
+          </button>
+        </>
+      ) : (
+        <>
+          <p className="text-sm text-gray-800 whitespace-pre-wrap">{preview}…</p>
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="mt-2 text-xs text-blue-600 hover:text-blue-800"
+          >
+            展开全部 ▼
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function MarkdownContent({ content }: { content: string }) {
   const parts = content.split(/(```[\s\S]*?```)/g);
   return (
@@ -136,6 +222,8 @@ export default function ReportPage() {
     setIsGenerating,
     addMessage,
     updateLastAssistantMessage,
+    removeMessagePair,
+    replaceAssistantMessage,
     setCurrentSql,
     setCurrentTitle,
     setCurrentChartType,
@@ -150,12 +238,20 @@ export default function ReportPage() {
 
   const [templates, setTemplates] = useState<any[]>([]);
   const [relationships, setRelationships] = useState<any[]>([]);
+  const [tableHeat, setTableHeat] = useState<any[]>([]);
+  const [tableCandidates, setTableCandidates] = useState<any[]>([]);
+  const [selectedTables, setSelectedTables] = useState<string[]>([]);
+  const [tableSearch, setTableSearch] = useState('');
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState(currentTitle);
   const [attachedFile, setAttachedFile] = useState<{ name: string; base64: string } | null>(null);
   const [toast, setToast] = useState('');
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [templateNameInput, setTemplateNameInput] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chartExportRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const projectId = activeProject?.id;
   const dataSourceId = activeDataSource?.id;
@@ -170,8 +266,19 @@ export default function ReportPage() {
     setReportRecords(history);
     setTemplates(tpls);
     if (dataSourceId) {
-      const rels = await window.electronAPI.report.getRelationships(dataSourceId);
+      const [rels, heat, schema] = await Promise.all([
+        window.electronAPI.report.getRelationships(dataSourceId),
+        window.electronAPI.report.getTableHeat(dataSourceId),
+        window.electronAPI.getSchemaFromCache(dataSourceId),
+      ]);
       setRelationships(rels);
+      setTableHeat(heat);
+      setTableCandidates(schema || []);
+    } else {
+      setRelationships([]);
+      setTableHeat([]);
+      setTableCandidates([]);
+      setSelectedTables([]);
     }
   }, [projectId, dataSourceId, setReportRecords]);
 
@@ -206,6 +313,66 @@ export default function ReportPage() {
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(''), 2000);
+  };
+
+  const adjustTextareaHeight = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const lineHeight = 22;
+    const minH = lineHeight * 2 + 16;
+    const maxH = lineHeight * 6 + 16;
+    const next = Math.min(Math.max(el.scrollHeight, minH), maxH);
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > maxH ? 'auto' : 'hidden';
+  }, []);
+
+  useEffect(() => {
+    adjustTextareaHeight();
+  }, [formDescription, adjustTextareaHeight]);
+
+  const lastAssistantId = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id;
+    }
+    return null;
+  })();
+
+  const runAssistantForUserText = async (userContent: string, assistantId: string) => {
+    if (!projectId || !dataSourceId || !dbType) return;
+
+    try {
+      const result = await window.electronAPI.report.sendMessage({
+        sessionKey,
+        projectId,
+        dataSourceId,
+        dbType,
+        message: userContent,
+        selectedTables,
+      });
+
+      if (!result.success) {
+        replaceAssistantMessage(assistantId, `❌ ${result.message}`);
+        return;
+      }
+
+      const content = result.content || '';
+      replaceAssistantMessage(assistantId, content || 'AI未返回有效内容，请重试');
+
+      const action = extractReportAction(content);
+      if (action?.action === 'chart_only' && action.chartType && currentQueryResult) {
+        setCurrentChartType(action.chartType as ChartType);
+        return;
+      }
+
+      const sql = extractSqlFromMarkdown(content);
+      if (sql) {
+        setCurrentSql(sql);
+        setCurrentTitle(extractTitleFromMarkdown(content));
+      }
+    } catch (e) {
+      replaceAssistantMessage(assistantId, `❌ ${(e as Error).message}`);
+    }
   };
 
   const saveCurrentReport = async () => {
@@ -246,48 +413,47 @@ export default function ReportPage() {
     }
 
     setFormDescription('');
+    const now = Date.now();
     const userMsg: ReportMessage = {
-      id: `msg_${Date.now()}`,
+      id: `msg_${now}`,
       role: 'user',
       content: userContent,
+      timestamp: now,
     };
+    const assistantId = `msg_${now}_ai`;
     addMessage(userMsg);
-    addMessage({ id: `msg_${Date.now()}_ai`, role: 'assistant', content: '' });
+    addMessage({ id: assistantId, role: 'assistant', content: '', timestamp: now });
     setIsGenerating(true);
 
     try {
-      const result = await window.electronAPI.report.sendMessage({
-        sessionKey,
-        projectId,
-        dataSourceId,
-        dbType,
-        message: userContent,
-      });
-
-      if (!result.success) {
-        updateLastAssistantMessage(`❌ ${result.message}`);
-        return;
-      }
-
-      const content = result.content || '';
-      updateLastAssistantMessage(content);
-
-      const action = extractReportAction(content);
-      if (action?.action === 'chart_only' && action.chartType && currentQueryResult) {
-        setCurrentChartType(action.chartType as ChartType);
-        return;
-      }
-
-      const sql = extractSqlFromMarkdown(content);
-      if (sql) {
-        setCurrentSql(sql);
-        setCurrentTitle(extractTitleFromMarkdown(content));
-      }
-    } catch (e) {
-      updateLastAssistantMessage(`❌ ${(e as Error).message}`);
+      await runAssistantForUserText(userContent, assistantId);
     } finally {
       setIsGenerating(false);
+      textareaRef.current?.focus();
     }
+  };
+
+  const handleRegenerate = async (assistantId: string) => {
+    const idx = messages.findIndex((m) => m.id === assistantId);
+    if (idx <= 0) return;
+    const userMsg = messages[idx - 1];
+    if (userMsg.role !== 'user') return;
+
+    replaceAssistantMessage(assistantId, '');
+    setIsGenerating(true);
+    try {
+      await runAssistantForUserText(userMsg.content, assistantId);
+    } finally {
+      setIsGenerating(false);
+      textareaRef.current?.focus();
+    }
+  };
+
+  const handleCopyAssistant = async (msg: ReportMessage) => {
+    const text = msg.content.replace(/```[\s\S]*?```/g, '').trim() || msg.content;
+    await copyToClipboard(text);
+    setCopiedId(msg.id);
+    setTimeout(() => setCopiedId(null), 2000);
   };
 
   const handleExecuteSql = async (sql?: string) => {
@@ -329,6 +495,7 @@ export default function ReportPage() {
       }
 
       await saveCurrentReport();
+      await loadSidebarData();
     } finally {
       setIsGenerating(false);
     }
@@ -357,6 +524,28 @@ export default function ReportPage() {
       r.description.toLowerCase().includes(searchKeyword.toLowerCase())
   );
   const grouped = groupHistoryByTime(filteredHistory);
+  const heatByTable = new Map(tableHeat.map((h) => [String(h.tableName).toUpperCase(), h]));
+  const filteredTables = tableCandidates
+    .filter((table) => {
+      const keyword = tableSearch.trim().toLowerCase();
+      if (!keyword) return true;
+      return (
+        String(table.tableName || '').toLowerCase().includes(keyword) ||
+        String(table.comments || '').toLowerCase().includes(keyword)
+      );
+    })
+    .sort((a, b) => {
+      const ah = heatByTable.get(String(a.tableName).toUpperCase());
+      const bh = heatByTable.get(String(b.tableName).toUpperCase());
+      const as = (ah?.queryCount || 0) + (ah?.reportCount || 0) * 3 + (ah?.manualWeight || 0);
+      const bs = (bh?.queryCount || 0) + (bh?.reportCount || 0) * 3 + (bh?.manualWeight || 0);
+      return bs - as;
+    });
+  const toggleSelectedTable = (tableName: string) => {
+    setSelectedTables((prev) =>
+      prev.includes(tableName) ? prev.filter((t) => t !== tableName) : [...prev, tableName]
+    );
+  };
 
   if (!window.electronAPI?.report) {
     return <div className="p-8 text-gray-500">报表模块未加载</div>;
@@ -373,7 +562,7 @@ export default function ReportPage() {
       {/* 左侧面板 */}
       <aside className="w-80 border-r bg-white flex flex-col shrink-0">
         <div className="flex border-b">
-          {(['history', 'templates', 'relationships'] as const).map((tab) => (
+          {(['history', 'templates', 'relationships', 'tables'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setLeftPanelTab(tab)}
@@ -381,7 +570,7 @@ export default function ReportPage() {
                 leftPanelTab === tab ? 'text-blue-600 border-b-2 border-blue-500' : 'text-gray-500'
               }`}
             >
-              {tab === 'history' ? '📋 历史' : tab === 'templates' ? '📁 模板' : '🔗 关系'}
+              {tab === 'history' ? '📋 历史' : tab === 'templates' ? '📁 模板' : tab === 'relationships' ? '🔗 关系' : '🔥 表'}
             </button>
           ))}
         </div>
@@ -493,6 +682,94 @@ export default function ReportPage() {
             ))}
           </div>
         )}
+
+        {leftPanelTab === 'tables' && (
+          <div className="flex-1 flex flex-col overflow-hidden p-2 text-xs">
+            <div className="mb-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-800">
+              已选 {selectedTables.length} 张表；选择后本次报表会优先且仅使用这些表。
+            </div>
+            <input
+              placeholder="搜索表名/备注..."
+              value={tableSearch}
+              onChange={(e) => setTableSearch(e.target.value)}
+              className="mb-2 px-2 py-1 text-sm border rounded"
+            />
+            <div className="mb-2 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setSelectedTables([])}
+                className="flex-1 rounded border px-2 py-1 hover:bg-gray-50"
+              >
+                清空选择
+              </button>
+              {dataSourceId && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (confirm('清空当前数据源的表热度？')) {
+                      await window.electronAPI.report.clearTableHeat(dataSourceId);
+                      await loadSidebarData();
+                    }
+                  }}
+                  className="flex-1 rounded border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50"
+                >
+                  清空热度
+                </button>
+              )}
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-1">
+              {filteredTables.length === 0 ? (
+                <p className="py-4 text-center text-gray-400">暂无表结构，请先在数据查询中加载表结构</p>
+              ) : (
+                filteredTables.map((table) => {
+                  const heat = heatByTable.get(String(table.tableName).toUpperCase());
+                  const score = (heat?.queryCount || 0) + (heat?.reportCount || 0) * 3 + (heat?.manualWeight || 0);
+                  const checked = selectedTables.includes(table.tableName);
+                  return (
+                    <label
+                      key={table.tableName}
+                      className={`block cursor-pointer rounded border p-2 ${
+                        checked ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSelectedTable(table.tableName)}
+                          className="mt-0.5"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-mono text-[11px] text-gray-800" title={table.tableName}>
+                            {table.tableName}
+                          </p>
+                          {table.comments && <p className="truncate text-gray-400">{table.comments}</p>}
+                          <p className="mt-1 text-gray-400">
+                            热度 {score} · 查询 {heat?.queryCount || 0} · 报表 {heat?.reportCount || 0}
+                          </p>
+                        </div>
+                        {heat?.id && (
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.preventDefault();
+                              await window.electronAPI.report.deleteTableHeat(heat.id);
+                              await loadSidebarData();
+                            }}
+                            className="text-red-500 hover:text-red-700"
+                            title="删除热度"
+                          >
+                            删除
+                          </button>
+                        )}
+                      </div>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
       </aside>
 
       {/* 右侧对话区 */}
@@ -500,36 +777,74 @@ export default function ReportPage() {
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.length === 0 && (
             <div className="text-center text-gray-400 mt-20">
-              <p className="text-lg mb-2">AI 报表</p>
-              <p className="text-sm">用自然语言描述报表需求，AI 将生成 SQL 与图表</p>
+              <p className="text-lg mb-2">👋 你好！我是AI报表助手</p>
+              <p className="text-sm">告诉我你想查询什么数据</p>
               {!dataSourceId && (
                 <p className="text-amber-600 text-sm mt-4">请先在项目管理中配置数据源，并在数据查询中加载表结构</p>
               )}
             </div>
           )}
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
+          {messages.map((msg) => {
+            const isLastAssistant = msg.role === 'assistant' && msg.id === lastAssistantId;
+            const showThinking = isLastAssistant && isGenerating && !msg.content.trim();
+
+            return (
               <div
-                className={`max-w-[85%] rounded-lg px-4 py-3 ${
-                  msg.role === 'user'
-                    ? 'bg-blue-500 text-white'
-                    : msg.isConfirm
-                      ? 'bg-amber-50 border border-amber-200 text-gray-800'
-                      : 'bg-white border border-gray-200 shadow-sm'
-                }`}
+                key={msg.id}
+                className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
               >
-                {msg.role === 'user' ? (
-                  <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                ) : (
-                  <MarkdownContent content={msg.content || (isGenerating ? '思考中...' : '')} />
-                )}
+                <div
+                  className={`max-w-[85%] rounded-lg px-4 py-3 ${
+                    msg.role === 'user'
+                      ? 'bg-blue-500 text-white'
+                      : msg.isConfirm
+                        ? 'bg-amber-50 border border-amber-200 text-gray-800'
+                        : 'bg-white border border-gray-200 shadow-sm'
+                  }`}
+                >
+                  {msg.role === 'user' ? (
+                    <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                  ) : showThinking ? (
+                    <ThinkingDots />
+                  ) : !msg.content.trim() ? (
+                    <p className="text-sm text-gray-500">AI未返回有效内容，请重试</p>
+                  ) : (
+                    <CollapsibleAssistantContent content={msg.content} />
+                  )}
+
+                  {msg.role === 'assistant' && !showThinking && msg.content.trim() && (
+                    <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-2 text-xs text-gray-500">
+                      <button
+                        type="button"
+                        onClick={() => handleCopyAssistant(msg)}
+                        className="inline-flex items-center gap-1 hover:text-blue-600"
+                      >
+                        {copiedId === msg.id ? '已复制 ✓' : '📋 复制'}
+                      </button>
+                      {isLastAssistant && !isGenerating && (
+                        <button
+                          type="button"
+                          onClick={() => handleRegenerate(msg.id)}
+                          className="inline-flex items-center gap-1 hover:text-blue-600"
+                        >
+                          🔄 重新生成
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeMessagePair(msg.id)}
+                        className="inline-flex items-center gap-1 hover:text-red-600"
+                      >
+                        🗑️ 删除
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <span className="mt-1 px-1 text-[10px] text-gray-400">{formatMessageTime(msg)}</span>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {currentSql && (
             <div className="bg-white border rounded-lg p-4 shadow-sm">
@@ -636,26 +951,86 @@ export default function ReportPage() {
                 >
                   导出图片
                 </button>
-                <button
-                  className="px-3 py-1 text-sm border rounded hover:bg-gray-50"
-                  onClick={async () => {
-                    const name = prompt('模板名称');
-                    if (!name || !projectId || !dataSourceId) return;
-                    await window.electronAPI.report.saveTemplate({
-                      projectId,
-                      dataSourceId,
-                      name,
-                      description: '',
-                      sqlTemplate: currentSql || '',
-                      parameters: '[]',
-                      chartType: currentChartType,
-                    });
-                    loadSidebarData();
-                    showToast('模板已保存');
-                  }}
-                >
-                  保存为模板
-                </button>
+                {savingTemplate ? (
+                  <div className="flex items-center gap-2">
+                    <input
+                      autoFocus
+                      className="px-2 py-1 text-sm border rounded w-40"
+                      placeholder="模板名称"
+                      value={templateNameInput}
+                      onChange={(e) => setTemplateNameInput(e.target.value)}
+                      onKeyDown={async (e) => {
+                        if (e.key === 'Enter') {
+                          const name = templateNameInput.trim();
+                          if (!name || !projectId || !dataSourceId) {
+                            setSavingTemplate(false);
+                            return;
+                          }
+                          await window.electronAPI.report.saveTemplate({
+                            projectId,
+                            dataSourceId,
+                            name,
+                            description: '',
+                            sqlTemplate: currentSql || '',
+                            parameters: '[]',
+                            chartType: currentChartType,
+                          });
+                          setSavingTemplate(false);
+                          setTemplateNameInput('');
+                          loadSidebarData();
+                          showToast('模板已保存');
+                        } else if (e.key === 'Escape') {
+                          setSavingTemplate(false);
+                          setTemplateNameInput('');
+                        }
+                      }}
+                    />
+                    <button
+                      className="px-2 py-1 text-sm border rounded hover:bg-gray-50"
+                      onClick={async () => {
+                        const name = templateNameInput.trim();
+                        if (!name || !projectId || !dataSourceId) {
+                          setSavingTemplate(false);
+                          return;
+                        }
+                        await window.electronAPI.report.saveTemplate({
+                          projectId,
+                          dataSourceId,
+                          name,
+                          description: '',
+                          sqlTemplate: currentSql || '',
+                          parameters: '[]',
+                          chartType: currentChartType,
+                        });
+                        setSavingTemplate(false);
+                        setTemplateNameInput('');
+                        loadSidebarData();
+                        showToast('模板已保存');
+                      }}
+                    >
+                      确认
+                    </button>
+                    <button
+                      className="px-2 py-1 text-sm border rounded hover:bg-gray-50"
+                      onClick={() => {
+                        setSavingTemplate(false);
+                        setTemplateNameInput('');
+                      }}
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="px-3 py-1 text-sm border rounded hover:bg-gray-50"
+                    onClick={() => {
+                      setSavingTemplate(true);
+                      setTemplateNameInput('');
+                    }}
+                  >
+                    保存为模板
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -670,33 +1045,68 @@ export default function ReportPage() {
           onDrop={onFileDrop}
         >
           {attachedFile && (
-            <div className="text-xs text-blue-600 mb-1 flex items-center gap-2">
-              📎 {attachedFile.name}
-              <button onClick={() => setAttachedFile(null)} className="text-gray-400">
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs text-blue-700">
+              <span>📎 {attachedFile.name}</span>
+              <button
+                type="button"
+                onClick={() => setAttachedFile(null)}
+                className="text-blue-400 hover:text-blue-700"
+                aria-label="移除附件"
+              >
                 ×
               </button>
             </div>
           )}
-          <div className="flex gap-2">
-            <textarea
-              value={formDescription}
-              onChange={(e) => setFormDescription(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder="输入报表需求，可拖拽 Excel 文件..."
-              rows={2}
-              className="flex-1 border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
-            />
+          <div className="flex gap-2 items-end">
+            <div className="relative flex-1">
+              <textarea
+                ref={textareaRef}
+                value={formDescription}
+                onChange={(e) => setFormDescription(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                placeholder="描述你想查询的数据，例如：本月门诊收入趋势"
+                rows={2}
+                className="w-full border rounded-lg px-3 py-2 pr-8 pb-5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
+              />
+              <div
+                className={`pointer-events-none absolute bottom-1 right-2 text-[10px] ${
+                  formDescription.length > 2000 ? 'text-red-500' : 'text-gray-400'
+                }`}
+              >
+                {formDescription.length}/2000
+              </div>
+            </div>
+            {formDescription.trim() && !isGenerating && (
+              <button
+                type="button"
+                onClick={() => setFormDescription('')}
+                className="px-2 py-2 text-gray-400 hover:text-gray-600 self-end"
+                aria-label="清空"
+              >
+                ×
+              </button>
+            )}
             <button
               onClick={handleSend}
               disabled={!formDescription.trim() || isGenerating}
-              className="px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-40 self-end"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all self-end disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500 disabled:opacity-40 disabled:shadow-none bg-blue-500 text-white hover:bg-blue-600 hover:shadow-md"
             >
-              {isGenerating ? '...' : '发送'}
+              {isGenerating ? (
+                <>
+                  <SpinnerIcon />
+                  生成中...
+                </>
+              ) : (
+                <>
+                  发送
+                  <SendIcon />
+                </>
+              )}
             </button>
           </div>
         </div>

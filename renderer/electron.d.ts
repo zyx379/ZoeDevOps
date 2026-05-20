@@ -122,6 +122,7 @@ export interface ElectronAPI {
   setGitLabConfig: (config: any) => Promise<{ success: boolean; message: string }>;
   testGetCode: (params: any) => Promise<any>;
   onAIStream: (callback: (content: string) => void) => () => void;
+  onChatStreamChunk: (callback: (data: { projectId: string; chunk: string }) => void) => () => void;
   onAnalysisStepUpdate: (callback: (stepData: AnalysisStepData) => void) => () => void;
   onAnalysisStepComplete: (callback: (stepData: AnalysisStepData) => void) => () => void;
   onAnalysisStepError: (callback: (stepData: AnalysisStepData) => void) => () => void;
@@ -182,6 +183,7 @@ export interface ElectronAPI {
       dbType: 'oracle' | 'dameng';
       message: string;
       resetSession?: boolean;
+      selectedTables?: string[];
     }) => Promise<{ success: boolean; content?: string; conversation?: any[]; message?: string }>;
     executeQuery: (params: {
       sessionKey: string;
@@ -203,6 +205,9 @@ export interface ElectronAPI {
     getTemplates: (projectId: string) => Promise<any[]>;
     saveTemplate: (tpl: any) => Promise<any>;
     deleteTemplate: (id: string) => Promise<{ success: boolean }>;
+    getTableHeat: (dataSourceId: string) => Promise<any[]>;
+    deleteTableHeat: (id: string) => Promise<{ success: boolean }>;
+    clearTableHeat: (dataSourceId: string) => Promise<{ success: boolean }>;
     parseExcel: (base64: string, fileName: string) => Promise<any>;
     onStreamChunk: (callback: (data: { sessionKey: string; chunk: string }) => void) => () => void;
   };

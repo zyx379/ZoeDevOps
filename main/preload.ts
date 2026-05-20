@@ -202,6 +202,9 @@ export interface ElectronAPI {
     getTemplates: (projectId: string) => Promise<any[]>;
     saveTemplate: (tpl: any) => Promise<any>;
     deleteTemplate: (id: string) => Promise<any>;
+    getTableHeat: (dataSourceId: string) => Promise<any[]>;
+    deleteTableHeat: (id: string) => Promise<any>;
+    clearTableHeat: (dataSourceId: string) => Promise<any>;
     parseExcel: (base64: string, fileName: string) => Promise<any>;
     onStreamChunk: (callback: (data: { sessionKey: string; chunk: string }) => void) => () => void;
   };
@@ -324,6 +327,9 @@ const api: ElectronAPI = {
     getTemplates: (projectId) => ipcRenderer.invoke('report:getTemplates', projectId),
     saveTemplate: (tpl) => ipcRenderer.invoke('report:saveTemplate', tpl),
     deleteTemplate: (id) => ipcRenderer.invoke('report:deleteTemplate', id),
+    getTableHeat: (dataSourceId) => ipcRenderer.invoke('report:getTableHeat', dataSourceId),
+    deleteTableHeat: (id) => ipcRenderer.invoke('report:deleteTableHeat', id),
+    clearTableHeat: (dataSourceId) => ipcRenderer.invoke('report:clearTableHeat', dataSourceId),
     parseExcel: (base64, fileName) => ipcRenderer.invoke('report:parseExcel', base64, fileName),
     onStreamChunk: (callback) => {
       const handler = (_: any, data: { sessionKey: string; chunk: string }) => callback(data);

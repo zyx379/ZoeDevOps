@@ -11,6 +11,7 @@ const redis_1 = require("../redis");
 const gitLab_1 = require("../agent/tools/gitLab");
 const report_1 = require("../report");
 const reportStorage_1 = require("../database/reportStorage");
+const tableNames_1 = require("../report/tableNames");
 let currentAbortController = null;
 const chatSessions = new Map();
 function registerIpcHandlers() {
@@ -263,6 +264,7 @@ function registerIpcHandlers() {
                 dataSourceId,
                 dataSourceName: dataSource.name,
             });
+            (0, reportStorage_1.bumpTableHeat)(dataSourceId, (0, tableNames_1.extractTableNamesFromSql)(sql), 'query');
             return result;
         }
         catch (error) {
@@ -648,6 +650,7 @@ function registerIpcHandlers() {
                 dataSourceId,
                 dataSourceName: dataSource.name,
             });
+            (0, reportStorage_1.bumpTableHeat)(dataSourceId, (0, tableNames_1.extractTableNamesFromSql)(sql), 'query');
             return result;
         }
         catch (error) {
@@ -793,7 +796,7 @@ function registerIpcHandlers() {
             }
             const result = await session.sendMessage(params.message, (chunk) => {
                 mainWindow.webContents.send('report:streamChunk', { sessionKey: params.sessionKey, chunk });
-            });
+            }, params.selectedTables || []);
             return {
                 success: true,
                 content: result.content,
@@ -813,6 +816,7 @@ function registerIpcHandlers() {
                 dbType: params.dbType,
             });
             const result = await session.executeSelect(params.sql);
+            (0, reportStorage_1.bumpTableHeat)(params.dataSourceId, (0, tableNames_1.extractTableNamesFromSql)(params.sql), 'report');
             return { success: true, ...result };
         }
         catch (error) {
@@ -872,6 +876,17 @@ function registerIpcHandlers() {
     });
     electron_1.ipcMain.handle('report:deleteTemplate', async (_event, id) => {
         (0, reportStorage_1.deleteReportTemplate)(id);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('report:getTableHeat', async (_event, dataSourceId) => {
+        return (0, reportStorage_1.getTableHeat)(dataSourceId);
+    });
+    electron_1.ipcMain.handle('report:deleteTableHeat', async (_event, id) => {
+        (0, reportStorage_1.deleteTableHeat)(id);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('report:clearTableHeat', async (_event, dataSourceId) => {
+        (0, reportStorage_1.clearTableHeat)(dataSourceId);
         return { success: true };
     });
     electron_1.ipcMain.handle('report:parseExcel', async (_event, base64, fileName) => {

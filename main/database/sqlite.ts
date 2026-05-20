@@ -13,6 +13,7 @@ import {
 } from './schemaCacheFiles';
 import { mergeSchemaIncremental, schemaTableKey } from './schemaMerge';
 import { initReportTables, invalidateTableRelationships } from './reportStorage';
+import { importPortableSeedIfAvailable } from './portableSeed';
 
 const ENCRYPTION_KEY = 'zoe-devops-encryption-key-v1';
 const OLD_ENCRYPTION_KEY = 'zoehis-helper-encryption-key-v1';
@@ -428,6 +429,7 @@ export async function initDatabase() {
   migrateSchemaCacheFromSqliteToFiles();
 
   initReportTables();
+  importPortableSeedIfAvailable(db, saveDatabase);
 
   saveDatabase();
   console.log('Database initialized successfully');

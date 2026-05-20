@@ -118,13 +118,13 @@ export function buildEChartsOption(
   };
 }
 
-export function groupHistoryByTime(records: { createdAt: string }[]) {
+export function groupHistoryByTime<T extends { createdAt: string }>(records: T[]) {
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yesterdayStart = new Date(todayStart.getTime() - 86400000);
   const weekStart = new Date(todayStart.getTime() - 7 * 86400000);
 
-  const groups: Record<string, typeof records> = {
+  const groups: Record<string, T[]> = {
     今天: [],
     昨天: [],
     本周: [],

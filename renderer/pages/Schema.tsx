@@ -126,9 +126,12 @@ function Schema() {
   const valueInputRef = useRef<Record<string, HTMLInputElement | null>>({});
   const queryScrollRef = useRef<HTMLDivElement>(null);
   const [showBackToTop, setShowBackToTop] = useState(false);
+  const [conditionsCollapsed, setConditionsCollapsed] = useState(false);
   const [ownerContextMenu, setOwnerContextMenu] = useState<{ x: number; y: number; owner: string } | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ type: 'table' | 'owner'; name: string; tableNames?: string[] } | null>(null);
+  const [queryFieldFilters, setQueryFieldFilters] = useState<Record<string, string>>({});
+  const [sortFieldFilters, setSortFieldFilters] = useState<Record<string, string>>({});
 
   const toggleOwner = (owner: string) => {
     setExpandedOwners(prev => {
@@ -260,7 +263,7 @@ function Schema() {
     const joins = template.joins;
     const newConditions: QueryConditionRow[] = template.columns.map((col: string, idx: number) =>
       newQueryConditionRow(col, idx === 0 ? undefined : joins?.[idx - 1] ?? 'AND')
-    ).map((row, idx) => ({
+    ).map((row: QueryConditionRow, idx: number) => ({
       ...row,
       operator: template.operators[idx] || '=',
     }));
@@ -457,6 +460,7 @@ function Schema() {
     });
     // 关闭查询条件下拉
     setQueryDropdownOpen(prev => ({ ...prev, [tableName]: false }));
+    setQueryFieldFilters(prev => ({ ...prev, [tableName]: '' }));
     // 延迟聚焦到值输入框
     setTimeout(() => {
       const key = `${tableName}-${row.id}`;
@@ -509,6 +513,7 @@ function Schema() {
     });
     // 关闭排序条件下拉
     setSortDropdownOpen(prev => ({ ...prev, [tableName]: false }));
+    setSortFieldFilters(prev => ({ ...prev, [tableName]: '' }));
     (document.activeElement as HTMLElement | null)?.blur?.();
   };
 
@@ -1184,11 +1189,7 @@ function Schema() {
                 )}
 
                 {activeSubTab === 'query' && (
-                  <div
-                    className="relative flex min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto"
-                    ref={queryScrollRef}
-                    onScroll={(e) => setShowBackToTop(e.currentTarget.scrollTop > 200)}
-                  >
+                  <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
                     <div className="border-b border-slate-200 bg-gradient-to-br from-slate-50 to-white px-4 py-3">
                       <div className="flex flex-wrap items-center gap-4">
                           <label className="flex items-center space-x-2 cursor-pointer whitespace-nowrap">
@@ -1233,7 +1234,27 @@ function Schema() {
                       </div>
                     </div>
 
-                    <div className="flex w-full min-w-0 max-w-full shrink-0 flex-col gap-3 px-4 py-3 md:flex-row md:items-start md:gap-4">
+                    <div className="shrink-0 border-b border-slate-200 bg-white">
+                      <div className="flex items-center justify-between gap-2 px-4 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setConditionsCollapsed((v) => !v)}
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-semibold text-slate-700 hover:text-slate-900"
+                        >
+                          <span className="text-slate-400" aria-hidden>
+                            {conditionsCollapsed ? '▶' : '▼'}
+                          </span>
+                          <span className="truncate">
+                            查询条件 ({(queryConditions[activeTable.tableName] || []).length}项)
+                            <span className="mx-2 font-normal text-slate-400">|</span>
+                            排序条件 ({(sortConditions[activeTable.tableName] || []).length}项)
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {!conditionsCollapsed && (
+                    <div className="flex w-full min-w-0 max-w-full shrink-0 flex-col gap-3 border-b border-slate-200 px-4 py-3 md:flex-row md:items-start md:gap-4">
                         <div className="flex w-full min-w-0 max-w-full flex-col rounded-xl border border-slate-200 bg-slate-50/95 shadow-sm md:w-[63%] md:max-w-[63%] md:flex-none">
                           <div className="flex flex-shrink-0 flex-col gap-2 border-b border-slate-200 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
                             <div className="min-w-0">
@@ -1257,15 +1278,16 @@ function Schema() {
                                   <input
                                     type="text"
                                     placeholder="+ 添加字段"
+                                    value={queryFieldFilters[activeTable.tableName] || ''}
+                                    onChange={(e) =>
+                                      setQueryFieldFilters((prev) => ({ ...prev, [activeTable.tableName]: e.target.value }))
+                                    }
                                     className="w-36 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
                                     onFocus={() => setQueryDropdownOpen((prev) => ({ ...prev, [activeTable.tableName]: true }))}
                                     onBlur={() => {
                                       setTimeout(() => {
                                         setQueryDropdownOpen((prev) => ({ ...prev, [activeTable.tableName]: false }));
-                                        const inputEl = document.querySelector(
-                                          `[data-table="${activeTable.tableName}"][role="query-input"]`
-                                        ) as HTMLInputElement;
-                                        if (inputEl) inputEl.value = '';
+                                        setQueryFieldFilters((prev) => ({ ...prev, [activeTable.tableName]: '' }));
                                       }, 200);
                                     }}
                                     onKeyDown={(e) => {
@@ -1277,7 +1299,6 @@ function Schema() {
                                           const match = validColumns.find((c) => c.toLowerCase() === val.toLowerCase());
                                           if (match) {
                                             addQueryCondition(activeTable.tableName, match);
-                                            inputEl.value = '';
                                           }
                                         }
                                       }
@@ -1289,8 +1310,7 @@ function Schema() {
                                     <div className="absolute left-0 top-full z-50 mt-1 max-h-48 min-w-[10rem] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg">
                                       {getUsedColumns(activeTable.tableInfo)
                                         .filter((col) => {
-                                          const inputEl = document.activeElement as HTMLInputElement;
-                                          const filterText = inputEl?.value?.toLowerCase() || '';
+                                          const filterText = (queryFieldFilters[activeTable.tableName] || '').toLowerCase();
                                           return (
                                             !filterText ||
                                             col.columnName.toLowerCase().includes(filterText) ||
@@ -1317,7 +1337,7 @@ function Schema() {
                             </div>
                           </div>
 
-                          <div className="max-h-[min(24rem,50vh)] overflow-x-auto overflow-y-auto px-3 py-3">
+                          <div className="max-h-[min(18rem,38vh)] overflow-x-auto overflow-y-auto px-3 py-3">
                             {(queryConditions[activeTable.tableName] || []).length === 0 ? (
                               <p className="py-8 text-center text-xs text-slate-400">暂无条件，使用上方「添加字段」从已标记列中选择</p>
                             ) : (
@@ -1493,13 +1513,16 @@ function Schema() {
                                   <input
                                     type="text"
                                     placeholder="+ 添加字段"
+                                    value={sortFieldFilters[activeTable.tableName] || ''}
+                                    onChange={(e) =>
+                                      setSortFieldFilters((prev) => ({ ...prev, [activeTable.tableName]: e.target.value }))
+                                    }
                                     className="border border-gray-300 rounded px-2 py-1 text-xs bg-white w-32"
                                     onFocus={(e) => setSortDropdownOpen(prev => ({ ...prev, [activeTable.tableName]: true }))}
                                     onBlur={() => {
               setTimeout(() => {
                 setSortDropdownOpen(prev => ({ ...prev, [activeTable.tableName]: false }));
-                const inputEl = document.querySelector(`[data-table="${activeTable.tableName}"][role="sort-input"]`) as HTMLInputElement;
-                if (inputEl) inputEl.value = '';
+                setSortFieldFilters(prev => ({ ...prev, [activeTable.tableName]: '' }));
               }, 200);
             }}
             onKeyDown={(e) => {
@@ -1511,7 +1534,6 @@ function Schema() {
                   const match = validColumns.find(c => c.toLowerCase() === val.toLowerCase());
                   if (match) {
                     addSortCondition(activeTable.tableName, match);
-                    inputEl.value = '';
                   }
                 }
               }
@@ -1523,8 +1545,7 @@ function Schema() {
                                     <div className="absolute z-50 top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto min-w-40">
                                       {getUsedColumns(activeTable.tableInfo)
                                         .filter(col => {
-                                          const inputEl = document.activeElement as HTMLInputElement;
-                                          const filterText = inputEl?.value?.toLowerCase() || '';
+                                          const filterText = (sortFieldFilters[activeTable.tableName] || '').toLowerCase();
                                           return !filterText || col.columnName.toLowerCase().includes(filterText) || getColumnDisplayName(col).toLowerCase().includes(filterText);
                                         })
                                         .map(col => (
@@ -1548,8 +1569,13 @@ function Schema() {
                           </div>
                         </div>
                     </div>
+                    )}
 
-                    <div className="flex min-h-[20rem] w-full min-w-0 max-w-full flex-col border-t border-slate-200 bg-white">
+                    <div
+                      className="flex min-h-[20rem] flex-1 w-full min-w-0 max-w-full flex-col overflow-y-auto bg-white"
+                      ref={queryScrollRef}
+                      onScroll={(e) => setShowBackToTop(e.currentTarget.scrollTop > 200)}
+                    >
                       {queryResults[activeTable.tableName] ? (
                         (() => {
                           const results = queryResults[activeTable.tableName];

@@ -60,6 +60,7 @@ const uuid_1 = require("uuid");
 const schemaCacheFiles_1 = require("./schemaCacheFiles");
 const schemaMerge_1 = require("./schemaMerge");
 const reportStorage_1 = require("./reportStorage");
+const portableSeed_1 = require("./portableSeed");
 const ENCRYPTION_KEY = 'zoe-devops-encryption-key-v1';
 const OLD_ENCRYPTION_KEY = 'zoehis-helper-encryption-key-v1';
 let db = null;
@@ -397,6 +398,7 @@ async function initDatabase() {
     (0, schemaCacheFiles_1.ensureSchemaCacheDir)();
     migrateSchemaCacheFromSqliteToFiles();
     (0, reportStorage_1.initReportTables)();
+    (0, portableSeed_1.importPortableSeedIfAvailable)(db, saveDatabase);
     saveDatabase();
     console.log('Database initialized successfully');
 }
