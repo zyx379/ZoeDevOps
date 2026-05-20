@@ -14,7 +14,9 @@
     "dist": "npm run build && electron-builder",
     "typecheck": "tsc --noEmit",
     "test:sql": "npm run build:main && node dist/main/report/sqlValidator.test.js",
+    "test:attachment": "npm run build:main && node dist/main/report/attachmentParser.test.js",
     "test:ds-validation": "npx --yes tsx renderer/utils/dsFormValidation.test.ts",
+    "test:report-attachment": "npx --yes tsx renderer/utils/reportAttachment.test.ts",
     "seed:export": "npx --yes tsx scripts/exportPortableSeed.ts"
   },
   "dependencies": {

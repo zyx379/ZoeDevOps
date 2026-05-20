@@ -212,6 +212,7 @@ export interface ElectronAPI {
         deleteTableHeat: (id: string) => Promise<any>;
         clearTableHeat: (dataSourceId: string) => Promise<any>;
         parseExcel: (base64: string, fileName: string) => Promise<any>;
+        parseAttachment: (kind: 'excel' | 'text' | 'image', base64: string, fileName: string) => Promise<any>;
         onStreamChunk: (callback: (data: {
             sessionKey: string;
             chunk: string;

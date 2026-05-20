@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerIpcHandlers = registerIpcHandlers;
 const electron_1 = require("electron");
@@ -890,22 +923,15 @@ function registerIpcHandlers() {
         return { success: true };
     });
     electron_1.ipcMain.handle('report:parseExcel', async (_event, base64, fileName) => {
-        try {
-            const XLSX = require('xlsx');
-            const buffer = Buffer.from(base64, 'base64');
-            const workbook = XLSX.read(buffer, { type: 'buffer' });
-            const sheetNames = workbook.SheetNames;
-            const sheets = sheetNames.map((name) => {
-                const sheet = workbook.Sheets[name];
-                const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-                const headers = (data[0] || []).map(String);
-                const rows = data.slice(1, 6);
-                return { name, headers, previewRows: rows, totalRows: Math.max(0, data.length - 1) };
-            });
-            return { success: true, fileName, sheets };
+        const { parseExcelAttachment } = await Promise.resolve().then(() => __importStar(require('../report/attachmentParser')));
+        const result = parseExcelAttachment(base64, fileName);
+        if (!result.success) {
+            return { success: false, message: result.message };
         }
-        catch (error) {
-            return { success: false, message: error.message };
-        }
+        return { success: true, fileName: result.fileName, sheets: result.sheets };
+    });
+    electron_1.ipcMain.handle('report:parseAttachment', async (_event, kind, base64, fileName) => {
+        const { parseReportAttachment } = await Promise.resolve().then(() => __importStar(require('../report/attachmentParser')));
+        return parseReportAttachment(kind, base64, fileName);
     });
 }

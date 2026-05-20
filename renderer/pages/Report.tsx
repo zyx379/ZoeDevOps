@@ -14,6 +14,15 @@ import {
   copyToClipboard,
   ChartType,
 } from '../utils/reportUtils';
+import {
+  ReportAttachmentKind,
+  reportAttachmentAccept,
+  detectReportAttachmentKind,
+  attachmentKindLabel,
+  attachmentKindIcon,
+  defaultPromptForAttachmentOnly,
+  readFileAsBase64,
+} from '../utils/reportAttachment';
 
 function ThinkingDots() {
   return (
@@ -244,7 +253,13 @@ export default function ReportPage() {
   const [tableSearch, setTableSearch] = useState('');
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState(currentTitle);
-  const [attachedFile, setAttachedFile] = useState<{ name: string; base64: string } | null>(null);
+  const [attachedFile, setAttachedFile] = useState<{
+    name: string;
+    base64: string;
+    kind: ReportAttachmentKind;
+  } | null>(null);
+  const [parsingAttachment, setParsingAttachment] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [toast, setToast] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [savingTemplate, setSavingTemplate] = useState(false);
@@ -394,25 +409,66 @@ export default function ReportPage() {
     await loadSidebarData();
   };
 
+  const buildUserContentWithAttachment = async (
+    text: string,
+    file: { name: string; base64: string; kind: ReportAttachmentKind }
+  ): Promise<string | null> => {
+    const parsed = await window.electronAPI.report.parseAttachment(
+      file.kind,
+      file.base64,
+      file.name
+    );
+    if (!parsed.success) {
+      showToast(parsed.message || '附件解析失败');
+      return null;
+    }
+    const base = text.trim() || defaultPromptForAttachmentOnly(file.kind);
+    return parsed.promptBlock ? `${base}\n\n${parsed.promptBlock}` : base;
+  };
+
+  const attachFile = async (file: File) => {
+    const kind = detectReportAttachmentKind(file.name);
+    if (!kind) {
+      showToast('仅支持 Excel、txt/csv、图片（png/jpg 等）');
+      return;
+    }
+    try {
+      const base64 = await readFileAsBase64(file);
+      setAttachedFile({ name: file.name, base64, kind });
+    } catch {
+      showToast('读取文件失败');
+    }
+  };
+
   const handleSend = async () => {
     const text = formDescription.trim();
-    if (!text || isGenerating) return;
+    if ((!text && !attachedFile) || isGenerating || parsingAttachment) return;
     if (!projectId || !dataSourceId || !dbType) {
       alert('请先在项目管理中选择项目并配置数据源');
       return;
     }
 
     let userContent = text;
-    if (attachedFile) {
-      const parsed = await window.electronAPI.report.parseExcel(attachedFile.base64, attachedFile.name);
-      if (parsed.success) {
-        const sheet = parsed.sheets[0];
-        userContent += `\n\n[附件 Excel: ${attachedFile.name}]\n表头: ${sheet.headers.join(', ')}\n预览:\n${sheet.previewRows.map((r: any[]) => r.join('\t')).join('\n')}`;
+    const fileToParse = attachedFile;
+    if (fileToParse) {
+      setParsingAttachment(true);
+      try {
+        const merged = await buildUserContentWithAttachment(text, fileToParse);
+        if (!merged) return;
+        userContent = merged;
+        setAttachedFile(null);
+      } finally {
+        setParsingAttachment(false);
       }
-      setAttachedFile(null);
+    } else if (!userContent) {
+      return;
     }
 
     setFormDescription('');
+    if (currentSql) {
+      setCurrentSql(null);
+      setCurrentQueryResult(null);
+    }
     const now = Date.now();
     const userMsg: ReportMessage = {
       id: `msg_${now}`,
@@ -440,6 +496,10 @@ export default function ReportPage() {
     if (userMsg.role !== 'user') return;
 
     replaceAssistantMessage(assistantId, '');
+    if (currentSql) {
+      setCurrentSql(null);
+      setCurrentQueryResult(null);
+    }
     setIsGenerating(true);
     try {
       await runAssistantForUserText(userMsg.content, assistantId);
@@ -508,13 +568,13 @@ export default function ReportPage() {
   const onFileDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      setAttachedFile({ name: file.name, base64 });
-    };
-    reader.readAsDataURL(file);
+    if (file) void attachFile(file);
+  };
+
+  const onFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) void attachFile(file);
+    e.target.value = '';
   };
 
   const filteredHistory = reportRecords.filter(
@@ -1046,7 +1106,10 @@ export default function ReportPage() {
         >
           {attachedFile && (
             <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs text-blue-700">
-              <span>📎 {attachedFile.name}</span>
+              <span>
+                {attachmentKindIcon(attachedFile.kind)} {attachmentKindLabel(attachedFile.kind)} ·{' '}
+                {attachedFile.name}
+              </span>
               <button
                 type="button"
                 onClick={() => setAttachedFile(null)}
@@ -1057,7 +1120,24 @@ export default function ReportPage() {
               </button>
             </div>
           )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            accept={reportAttachmentAccept()}
+            onChange={onFileInputChange}
+          />
           <div className="flex gap-2 items-end">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isGenerating || parsingAttachment}
+              className="px-2 py-2 text-gray-500 hover:text-blue-600 self-end border rounded-lg hover:border-blue-300 disabled:opacity-40"
+              title="添加 Excel、文本或图片附件"
+              aria-label="添加附件"
+            >
+              📎
+            </button>
             <div className="relative flex-1">
               <textarea
                 ref={textareaRef}
@@ -1069,7 +1149,7 @@ export default function ReportPage() {
                     handleSend();
                   }
                 }}
-                placeholder="描述你想查询的数据，例如：本月门诊收入趋势"
+                placeholder="描述报表需求；可拖拽或点击 📎 添加 Excel、txt、图片"
                 rows={2}
                 className="w-full border rounded-lg px-3 py-2 pr-8 pb-5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
               />
@@ -1093,10 +1173,17 @@ export default function ReportPage() {
             )}
             <button
               onClick={handleSend}
-              disabled={!formDescription.trim() || isGenerating}
+              disabled={
+                (!formDescription.trim() && !attachedFile) || isGenerating || parsingAttachment
+              }
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all self-end disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500 disabled:opacity-40 disabled:shadow-none bg-blue-500 text-white hover:bg-blue-600 hover:shadow-md"
             >
-              {isGenerating ? (
+              {parsingAttachment ? (
+                <>
+                  <SpinnerIcon />
+                  解析附件...
+                </>
+              ) : isGenerating ? (
                 <>
                   <SpinnerIcon />
                   生成中...

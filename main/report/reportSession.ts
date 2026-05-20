@@ -15,16 +15,24 @@ export const REPORT_SYSTEM_PROMPT = `你是 HIS 数据报表助手，帮助运�
 
 规则：
 1. 只生成 SELECT 语句，禁止 INSERT/UPDATE/DELETE/DROP/ALTER 等
-2. 必须限制行数：Oracle 用 ROWNUM <= 500，达梦用 TOP 500
-3. 表名、列名必须来自提供的 Schema，不可编造
-4. 多表 JOIN 时优先使用「已验证表关系」中的关联列
-5. 时间条件：Oracle 用 TO_DATE，达梦用 CAST
-6. 不确定时间范围、候选表时，先向用户确认
-7. 生成 SQL 后放在 \`\`\`sql 代码块中，并简要说明
-8. 若用户仅要求换图表类型，回复 JSON：\`\`\`report-action\n{"action":"chart_only","chartType":"line|bar|pie|table"}\n\`\`\`
-9. 报表标题放在首行，格式：# 标题
+2. 必须限制行数：Oracle 用 WHERE ROWNUM <= 500（或子查询外包一层再加 ROWNUM）；达梦用 SELECT TOP 500
+3. 表名、列名必须逐字来自提供的 Schema，禁止编造、禁止猜测缩写
+4. 多表 JOIN 时必须写表别名，关联列优先使用「已验证表关系」
+5. 时间条件：Oracle 用 TO_DATE('yyyy-mm-dd','YYYY-MM-DD')；达梦日期用 CAST 或 TO_DATE，与列类型匹配
+6. 字符串字面量用单引号；LIKE 模糊查询注意转义；IN 列表元素均需引号包裹
+7. 聚合查询中，SELECT 的非聚合列必须出现在 GROUP BY 中
+8. 不确定时间范围、候选表时，先向用户确认，不要输出 SQL
+9. 生成 SQL 时：只输出一条完整可执行语句，放在单个 \`\`\`sql 代码块中，块内不要夹杂解释文字
+10. 若用户反馈 SQL 执行报错，必须根据错误信息修正后重新输出完整 SQL，不要只给片段
+11. 若用户仅要求换图表类型，回复 JSON：\`\`\`report-action\n{"action":"chart_only","chartType":"line|bar|pie|table"}\n\`\`\`
+12. 报表标题放在首行，格式：# 标题
 
 回复使用中文。`;
+
+function extractSqlFromMarkdown(content: string): string | null {
+  const match = content.match(/```sql\s*([\s\S]*?)```/i);
+  return match ? match[1].trim() : null;
+}
 
 export interface ReportSessionContext {
   projectId: string;
@@ -72,6 +80,20 @@ export class ReportSession {
 
     this.conversation.push({ role: 'user', content: userMessage });
 
+    let assistantContent = await this.chatOnce(systemContent, onChunk);
+    const sql = extractSqlFromMarkdown(assistantContent);
+    if (sql) {
+      assistantContent = await this.ensureExecutableSql(systemContent, sql, assistantContent, onChunk);
+    }
+
+    this.conversation.push({ role: 'assistant', content: assistantContent });
+    return { content: assistantContent };
+  }
+
+  private async chatOnce(
+    systemContent: string,
+    onChunk: (content: string) => void
+  ): Promise<string> {
     let streamContent = '';
     const messages: ConversationMessage[] = [
       { role: 'system', content: systemContent },
@@ -90,9 +112,40 @@ export class ReportSession {
       },
     });
 
-    const assistantContent = response.choices[0]?.message?.content || streamContent;
-    this.conversation.push({ role: 'assistant', content: assistantContent });
-    return { content: assistantContent };
+    return response.choices[0]?.message?.content || streamContent;
+  }
+
+  /** 试执行 SQL，失败时自动请求模型修正一次 */
+  private async ensureExecutableSql(
+    systemContent: string,
+    sql: string,
+    assistantContent: string,
+    onChunk: (content: string) => void,
+    retriesLeft = 1
+  ): Promise<string> {
+    try {
+      await this.executeSelect(sql);
+      return assistantContent;
+    } catch (e) {
+      if (retriesLeft <= 0) {
+        return assistantContent;
+      }
+      const errMsg = (e as Error).message || '未知错误';
+      this.conversation.push({
+        role: 'user',
+        content:
+          `上述 SQL 在数据库试执行失败，请修正后重新输出完整 SQL（放在 \`\`\`sql 代码块中）。\n` +
+          `错误信息：${errMsg}\n` +
+          `失败 SQL：\n\`\`\`sql\n${sql}\n\`\`\``,
+      });
+      onChunk('\n\n');
+      let revised = await this.chatOnce(systemContent, onChunk);
+      const revisedSql = extractSqlFromMarkdown(revised);
+      if (revisedSql) {
+        revised = await this.ensureExecutableSql(systemContent, revisedSql, revised, onChunk, retriesLeft - 1);
+      }
+      return revised;
+    }
   }
 
   async validateJoin(

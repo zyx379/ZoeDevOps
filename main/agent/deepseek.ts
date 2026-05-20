@@ -241,6 +241,49 @@ export class DeepSeekClient {
     };
   }
 
+  /** 多模态识图（OpenAI 兼容 image_url 格式）；需 API/模型支持 vision */
+  async chatWithImage(
+    userText: string,
+    imageBase64: string,
+    mimeType: string,
+    options?: { temperature?: number; max_tokens?: number; model?: string }
+  ): Promise<string> {
+    const url = `${this.baseUrl}/chat/completions`;
+    const dataUrl = `data:${mimeType};base64,${imageBase64}`;
+    const requestBody = {
+      model: options?.model || this.model,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: userText },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+      temperature: options?.temperature ?? 0.2,
+      max_tokens: options?.max_tokens ?? 4096,
+      thinking: { type: 'disabled' },
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`DeepSeek API error: ${response.status} - ${error}`);
+    }
+
+    const json = (await response.json()) as ChatCompletionResponse;
+    return json.choices[0]?.message?.content || '';
+  }
+
   async chatSimple(userMessage: string, systemPrompt?: string): Promise<string> {
     const messages: ConversationMessage[] = [];
     

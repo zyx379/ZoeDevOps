@@ -72,6 +72,7 @@ const api = {
         deleteTableHeat: (id) => electron_1.ipcRenderer.invoke('report:deleteTableHeat', id),
         clearTableHeat: (dataSourceId) => electron_1.ipcRenderer.invoke('report:clearTableHeat', dataSourceId),
         parseExcel: (base64, fileName) => electron_1.ipcRenderer.invoke('report:parseExcel', base64, fileName),
+        parseAttachment: (kind, base64, fileName) => electron_1.ipcRenderer.invoke('report:parseAttachment', kind, base64, fileName),
         onStreamChunk: (callback) => {
             const handler = (_, data) => callback(data);
             electron_1.ipcRenderer.on('report:streamChunk', handler);

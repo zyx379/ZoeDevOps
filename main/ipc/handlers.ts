@@ -1061,21 +1061,19 @@ export function registerIpcHandlers() {
   });
 
   ipcMain.handle('report:parseExcel', async (_event, base64: string, fileName: string) => {
-    try {
-      const XLSX = require('xlsx');
-      const buffer = Buffer.from(base64, 'base64');
-      const workbook = XLSX.read(buffer, { type: 'buffer' });
-      const sheetNames = workbook.SheetNames;
-      const sheets = sheetNames.map((name: string) => {
-        const sheet = workbook.Sheets[name];
-        const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) as any[][];
-        const headers = (data[0] || []).map(String);
-        const rows = data.slice(1, 6);
-        return { name, headers, previewRows: rows, totalRows: Math.max(0, data.length - 1) };
-      });
-      return { success: true, fileName, sheets };
-    } catch (error) {
-      return { success: false, message: (error as Error).message };
+    const { parseExcelAttachment } = await import('../report/attachmentParser');
+    const result = parseExcelAttachment(base64, fileName);
+    if (!result.success) {
+      return { success: false, message: result.message };
     }
+    return { success: true, fileName: result.fileName, sheets: result.sheets };
   });
+
+  ipcMain.handle(
+    'report:parseAttachment',
+    async (_event, kind: 'excel' | 'text' | 'image', base64: string, fileName: string) => {
+      const { parseReportAttachment } = await import('../report/attachmentParser');
+      return parseReportAttachment(kind, base64, fileName);
+    }
+  );
 }

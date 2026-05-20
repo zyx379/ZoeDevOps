@@ -206,6 +206,11 @@ export interface ElectronAPI {
     deleteTableHeat: (id: string) => Promise<any>;
     clearTableHeat: (dataSourceId: string) => Promise<any>;
     parseExcel: (base64: string, fileName: string) => Promise<any>;
+    parseAttachment: (
+      kind: 'excel' | 'text' | 'image',
+      base64: string,
+      fileName: string
+    ) => Promise<any>;
     onStreamChunk: (callback: (data: { sessionKey: string; chunk: string }) => void) => () => void;
   };
   onChatStreamChunk: (callback: (data: { projectId: string; chunk: string }) => void) => () => void;
@@ -331,6 +336,8 @@ const api: ElectronAPI = {
     deleteTableHeat: (id) => ipcRenderer.invoke('report:deleteTableHeat', id),
     clearTableHeat: (dataSourceId) => ipcRenderer.invoke('report:clearTableHeat', dataSourceId),
     parseExcel: (base64, fileName) => ipcRenderer.invoke('report:parseExcel', base64, fileName),
+    parseAttachment: (kind, base64, fileName) =>
+      ipcRenderer.invoke('report:parseAttachment', kind, base64, fileName),
     onStreamChunk: (callback) => {
       const handler = (_: any, data: { sessionKey: string; chunk: string }) => callback(data);
       ipcRenderer.on('report:streamChunk', handler);
