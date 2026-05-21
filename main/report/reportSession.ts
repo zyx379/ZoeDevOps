@@ -1,7 +1,7 @@
 import { DeepSeekClient } from '../agent/deepseek';
 import { ConversationMessage } from '../agent/types';
 import { getGlobalConfig, getProjectDataSourceById } from '../database/sqlite';
-import { buildSchemaContextForAI } from './schemaContext';
+import { buildSchemaContextForAI, buildSchemaContextForSqlOptimize } from './schemaContext';
 import {
   getTableRelationshipsByDs,
   findRelationship,
@@ -10,6 +10,40 @@ import {
 import { executeOracleQuery } from '../database/oracle';
 import { executeDamengQuery } from '../database/dameng';
 import { validateSql, ensureRowLimit } from './sqlValidator';
+import { fetchExplainPlan } from './sqlExplain';
+import {
+  extractSqlFromText,
+  isSqlOptimizationRequest,
+  needsSqlContinuation,
+} from './reportIntent';
+
+/** 主进程侧累积流式输出，始终以完整文本通知渲染进程，避免竞态乱序 */
+class StreamDisplay {
+  private base = '';
+  private acc = '';
+
+  constructor(private readonly emit: (full: string) => void) {}
+
+  reset(base = ''): void {
+    this.base = base;
+    this.acc = '';
+    this.emitNow();
+  }
+
+  append(delta: string): void {
+    if (!delta) return;
+    this.acc += delta;
+    this.emitNow();
+  }
+
+  get full(): string {
+    return this.base + this.acc;
+  }
+
+  private emitNow(): void {
+    this.emit(this.full);
+  }
+}
 
 export const REPORT_SYSTEM_PROMPT = `你是 HIS 数据报表助手，帮助运维人员将自然语言转为 SQL 和可视化报表。
 
@@ -22,16 +56,49 @@ export const REPORT_SYSTEM_PROMPT = `你是 HIS 数据报表助手，帮助运�
 6. 字符串字面量用单引号；LIKE 模糊查询注意转义；IN 列表元素均需引号包裹
 7. 聚合查询中，SELECT 的非聚合列必须出现在 GROUP BY 中
 8. 不确定时间范围、候选表时，先向用户确认，不要输出 SQL
-9. 生成 SQL 时：只输出一条完整可执行语句，放在单个 \`\`\`sql 代码块中，块内不要夹杂解释文字
+9. 生成 SQL 时：只输出一条完整可执行语句，放在单个 \`\`\`sql 代码块中，块内不要夹杂解释文字；SQL 再长也必须完整输出，禁止用省略号或「同上」截断
 10. 若用户反馈 SQL 执行报错，必须根据错误信息修正后重新输出完整 SQL，不要只给片段
 11. 若用户仅要求换图表类型，回复 JSON：\`\`\`report-action\n{"action":"chart_only","chartType":"line|bar|pie|table"}\n\`\`\`
 12. 报表标题放在首行，格式：# 标题
 
 回复使用中文。`;
 
+export const REPORT_SQL_OPTIMIZATION_PROMPT = `
+【SQL 优化专项模式】
+用户正在请求优化/分析 SQL 性能。你必须：
+1. 以系统提供的「全库表目录」与「相关表结构（含索引）」为依据，不得编造表或列
+2. 结合系统自动采集的「EXPLAIN 执行计划」分析瓶颈（全表扫描、回表、错误 JOIN 顺序、缺失索引等）
+3. 给出优化后的完整 SQL（放在 \`\`\`sql 代码块），并简要说明改动点
+4. 优先建议：补索引、改写 JOIN、缩小驱动表、避免 SELECT *、将过滤条件下推
+5. 若执行计划显示某表全表扫描且 WHERE 有过滤列，检查该列是否有可用索引
+6. 优化 SQL 同样必须完整输出，不可截断`;
+
+/** 报表对话单次回复上限（长 SQL 场景） */
+const REPORT_MAX_TOKENS = 8192;
+
 function extractSqlFromMarkdown(content: string): string | null {
-  const match = content.match(/```sql\s*([\s\S]*?)```/i);
-  return match ? match[1].trim() : null;
+  return extractSqlFromText(content);
+}
+
+export class ReportGenerationAbortedError extends Error {
+  constructor() {
+    super('生成已中止');
+    this.name = 'ReportGenerationAbortedError';
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new ReportGenerationAbortedError();
+  }
+}
+
+export function isReportGenerationAborted(e: unknown): boolean {
+  return (
+    e instanceof ReportGenerationAbortedError ||
+    (e instanceof DOMException && e.name === 'AbortError') ||
+    (e instanceof Error && e.name === 'AbortError')
+  );
 }
 
 export interface ReportSessionContext {
@@ -63,12 +130,39 @@ export class ReportSession {
     this.conversation = [...messages];
   }
 
+  /** 从对话与上下文 SQL 中解析待优化/分析的 SQL */
+  private resolveSqlForContext(userMessage: string, contextSql?: string | null): string | null {
+    return (
+      extractSqlFromText(userMessage) ||
+      contextSql?.trim() ||
+      [...this.conversation]
+        .reverse()
+        .map((m) => (m.role === 'assistant' ? extractSqlFromText(m.content) : null))
+        .find(Boolean) ||
+      null
+    );
+  }
+
   async sendMessage(
     userMessage: string,
     onChunk: (content: string) => void,
-    selectedTables: string[] = []
+    selectedTables: string[] = [],
+    contextSql?: string | null,
+    abortSignal?: AbortSignal
   ): Promise<{ content: string }> {
-    const schemaCtx = buildSchemaContextForAI(this.context.dataSourceId, userMessage, selectedTables);
+    throwIfAborted(abortSignal);
+    const optimizeMode = isSqlOptimizationRequest(userMessage);
+    const sqlForContext = this.resolveSqlForContext(userMessage, contextSql);
+
+    const schemaCtx = optimizeMode
+      ? buildSchemaContextForSqlOptimize(
+          this.context.dataSourceId,
+          sqlForContext,
+          selectedTables,
+          userMessage
+        )
+      : buildSchemaContextForAI(this.context.dataSourceId, userMessage, selectedTables);
+
     const rels = getTableRelationshipsByDs(this.context.dataSourceId).filter((r) => r.isValid === 1);
     const relText =
       rels.length > 0
@@ -76,43 +170,145 @@ export class ReportSession {
           rels.map((r) => `- ${r.leftTable}.${r.leftColumn} = ${r.rightTable}.${r.rightColumn} (${r.joinType})`).join('\n')
         : '【已验证表关系】暂无';
 
-    const systemContent = `${REPORT_SYSTEM_PROMPT}\n\n数据库类型: ${this.context.dbType}\n\n${schemaCtx}\n\n${relText}`;
+    let explainBlock = '';
+    if (optimizeMode && sqlForContext) {
+      throwIfAborted(abortSignal);
+      try {
+        const plan = await fetchExplainPlan(this.context.dataSourceId, this.context.dbType, sqlForContext);
+        explainBlock = `\n\n【系统自动采集的 EXPLAIN 执行计划（${this.context.dbType}）】\n${plan}`;
+      } catch (e) {
+        if (isReportGenerationAborted(e)) throw e;
+        explainBlock = `\n\n【执行计划】采集失败：${(e as Error).message}（请结合 Schema 与 SQL 文本继续优化）`;
+      }
+    }
+
+    const systemContent =
+      `${REPORT_SYSTEM_PROMPT}${optimizeMode ? REPORT_SQL_OPTIMIZATION_PROMPT : ''}` +
+      `\n\n数据库类型: ${this.context.dbType}\n\n${schemaCtx}\n\n${relText}${explainBlock}`;
 
     this.conversation.push({ role: 'user', content: userMessage });
 
-    let assistantContent = await this.chatOnce(systemContent, onChunk);
-    const sql = extractSqlFromMarkdown(assistantContent);
-    if (sql) {
-      assistantContent = await this.ensureExecutableSql(systemContent, sql, assistantContent, onChunk);
-    }
+    try {
+      const display = new StreamDisplay(onChunk);
+      display.reset();
 
-    this.conversation.push({ role: 'assistant', content: assistantContent });
-    return { content: assistantContent };
+      const first = await this.chatOnceWithMeta(
+        systemContent,
+        (d) => display.append(d),
+        undefined,
+        abortSignal
+      );
+      let assistantContent = display.full || first.content;
+      assistantContent = await this.continueIfTruncated(
+        systemContent,
+        assistantContent,
+        display,
+        first.finishReason,
+        abortSignal
+      );
+
+      const sql = extractSqlFromMarkdown(assistantContent);
+      if (sql) {
+        assistantContent = await this.ensureExecutableSql(
+          systemContent,
+          sql,
+          assistantContent,
+          display,
+          abortSignal
+        );
+      }
+
+      this.conversation.push({ role: 'assistant', content: assistantContent });
+      return { content: assistantContent };
+    } catch (e) {
+      if (isReportGenerationAborted(e)) {
+        const last = this.conversation[this.conversation.length - 1];
+        if (last?.role === 'user' && last.content === userMessage) {
+          this.conversation.pop();
+        }
+      }
+      throw e;
+    }
   }
 
-  private async chatOnce(
+  private async chatOnceWithMeta(
     systemContent: string,
-    onChunk: (content: string) => void
-  ): Promise<string> {
+    onDelta: (delta: string) => void,
+    conversationOverride?: ConversationMessage[],
+    abortSignal?: AbortSignal
+  ): Promise<{ content: string; finishReason: string }> {
+    throwIfAborted(abortSignal);
     let streamContent = '';
+    let finishReason = 'stop';
+    const convo = conversationOverride ?? this.conversation;
     const messages: ConversationMessage[] = [
       { role: 'system', content: systemContent },
-      ...this.conversation,
+      ...convo,
     ];
 
     const response = await this.client.chat(messages, {
       tools: false,
       stream: true,
+      max_tokens: REPORT_MAX_TOKENS,
+      signal: abortSignal,
       onChunk: (chunk) => {
+        const fr = chunk.choices[0]?.finish_reason;
+        if (fr) finishReason = fr;
         const delta = chunk.choices[0]?.delta;
         if (delta?.content) {
           streamContent += delta.content;
-          onChunk(delta.content);
+          onDelta(delta.content);
         }
       },
     });
 
-    return response.choices[0]?.message?.content || streamContent;
+    const fr = response.choices[0]?.finish_reason;
+    if (fr) finishReason = fr;
+
+    return {
+      content: response.choices[0]?.message?.content || streamContent,
+      finishReason,
+    };
+  }
+
+  /** 输出因 max_tokens 或 SQL 围栏未闭合被截断时，最多续写 1 次 */
+  private async continueIfTruncated(
+    systemContent: string,
+    content: string,
+    display: StreamDisplay,
+    initialFinishReason = 'stop',
+    abortSignal?: AbortSignal,
+    maxContinuations = 1
+  ): Promise<string> {
+    let merged = content;
+    let lastFinish = initialFinishReason;
+    for (let i = 0; i < maxContinuations; i++) {
+      throwIfAborted(abortSignal);
+      if (!needsSqlContinuation(merged, lastFinish)) break;
+
+      const continuationUser: ConversationMessage = {
+        role: 'user',
+        content:
+          '上一轮回复中的 ```sql 代码块不完整或被截断。请仅补全缺失部分；若无法续写则重新输出完整 SQL（单个 ```sql 块，禁止省略）。',
+      };
+      const tempConvo: ConversationMessage[] = [
+        ...this.conversation,
+        { role: 'assistant', content: merged },
+        continuationUser,
+      ];
+      display.reset(merged);
+      display.append('\n\n');
+      const { content: more, finishReason } = await this.chatOnceWithMeta(
+        systemContent,
+        (d) => display.append(d),
+        tempConvo,
+        abortSignal
+      );
+      merged = merged + more;
+      display.reset(merged);
+      lastFinish = finishReason;
+    }
+    return display.full || merged;
   }
 
   /** 试执行 SQL，失败时自动请求模型修正一次 */
@@ -120,13 +316,16 @@ export class ReportSession {
     systemContent: string,
     sql: string,
     assistantContent: string,
-    onChunk: (content: string) => void,
+    display: StreamDisplay,
+    abortSignal?: AbortSignal,
     retriesLeft = 1
   ): Promise<string> {
+    throwIfAborted(abortSignal);
     try {
       await this.executeSelect(sql);
       return assistantContent;
     } catch (e) {
+      if (isReportGenerationAborted(e)) throw e;
       if (retriesLeft <= 0) {
         return assistantContent;
       }
@@ -138,13 +337,34 @@ export class ReportSession {
           `错误信息：${errMsg}\n` +
           `失败 SQL：\n\`\`\`sql\n${sql}\n\`\`\``,
       });
-      onChunk('\n\n');
-      let revised = await this.chatOnce(systemContent, onChunk);
-      const revisedSql = extractSqlFromMarkdown(revised);
+      const prefix = assistantContent + '\n\n';
+      display.reset(prefix);
+      const rev = await this.chatOnceWithMeta(
+        systemContent,
+        (d) => display.append(d),
+        undefined,
+        abortSignal
+      );
+      let merged = prefix + rev.content;
+      merged = await this.continueIfTruncated(
+        systemContent,
+        merged,
+        display,
+        rev.finishReason,
+        abortSignal
+      );
+      const revisedSql = extractSqlFromMarkdown(merged);
       if (revisedSql) {
-        revised = await this.ensureExecutableSql(systemContent, revisedSql, revised, onChunk, retriesLeft - 1);
+        merged = await this.ensureExecutableSql(
+          systemContent,
+          revisedSql,
+          merged,
+          display,
+          abortSignal,
+          retriesLeft - 1
+        );
       }
-      return revised;
+      return display.full || merged;
     }
   }
 

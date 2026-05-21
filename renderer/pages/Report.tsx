@@ -71,21 +71,39 @@ function SpinnerIcon() {
   );
 }
 
+function splitAssistantContent(content: string): { codeBlocks: string[]; prose: string } {
+  const codeBlocks: string[] = [];
+  const closed = content.match(/```[\s\S]*?```/g) || [];
+  for (const block of closed) {
+    if (!block.toLowerCase().startsWith('```report-action')) codeBlocks.push(block);
+  }
+  let prose = content.replace(/```[\s\S]*?```/g, '');
+  const openSql = content.match(/```sql[\s\S]*$/i);
+  if (openSql && !codeBlocks.includes(openSql[0])) {
+    codeBlocks.push(openSql[0]);
+    prose = prose.replace(/```sql[\s\S]*$/i, '');
+  }
+  return { codeBlocks, prose: prose.trim() };
+}
+
 function CollapsibleAssistantContent({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
-  const plain = content.replace(/```[\s\S]*?```/g, '').trim();
-  const shouldCollapse = plain.length > 500;
+  const { codeBlocks, prose } = splitAssistantContent(content);
+  const shouldCollapse = prose.length > 500;
 
   if (!shouldCollapse) {
     return <MarkdownContent content={content} />;
   }
 
-  const preview = plain.slice(0, 200);
+  const preview = prose.slice(0, 200);
   return (
     <div>
+      {codeBlocks.map((block, i) => (
+        <MarkdownContent key={`code-${i}`} content={block} />
+      ))}
       {expanded ? (
         <>
-          <MarkdownContent content={content} />
+          {prose ? <p className="text-sm text-gray-800 whitespace-pre-wrap">{prose}</p> : null}
           <button
             type="button"
             onClick={() => setExpanded(false)}
@@ -96,7 +114,7 @@ function CollapsibleAssistantContent({ content }: { content: string }) {
         </>
       ) : (
         <>
-          <p className="text-sm text-gray-800 whitespace-pre-wrap">{preview}…</p>
+          {prose ? <p className="text-sm text-gray-800 whitespace-pre-wrap">{preview}…</p> : null}
           <button
             type="button"
             onClick={() => setExpanded(true)}
@@ -230,7 +248,6 @@ export default function ReportPage() {
     setFormDescription,
     setIsGenerating,
     addMessage,
-    updateLastAssistantMessage,
     removeMessagePair,
     replaceAssistantMessage,
     setCurrentSql,
@@ -267,6 +284,8 @@ export default function ReportPage() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chartExportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** 当前正在流式输出的助手消息 id，用于按 id 更新避免竞态乱序 */
+  const streamingAssistantIdRef = useRef<string | null>(null);
 
   const projectId = activeProject?.id;
   const dataSourceId = activeDataSource?.id;
@@ -311,19 +330,13 @@ export default function ReportPage() {
 
   useEffect(() => {
     if (!window.electronAPI?.report) return;
-    return window.electronAPI.report.onStreamChunk(({ sessionKey: sk, chunk }) => {
+    return window.electronAPI.report.onStreamChunk(({ sessionKey: sk, content }) => {
       if (sk !== sessionKey) return;
-      const msgs = useReportStore.getState().messages;
-      let lastContent = '';
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'assistant') {
-          lastContent = msgs[i].content;
-          break;
-        }
-      }
-      updateLastAssistantMessage(lastContent + chunk);
+      const assistantId = streamingAssistantIdRef.current;
+      if (!assistantId) return;
+      replaceAssistantMessage(assistantId, content);
     });
-  }, [sessionKey, updateLastAssistantMessage]);
+  }, [sessionKey, replaceAssistantMessage]);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -353,7 +366,26 @@ export default function ReportPage() {
     return null;
   })();
 
-  const runAssistantForUserText = async (userContent: string, assistantId: string) => {
+  const markAssistantAborted = (assistantId: string) => {
+    const current = useReportStore.getState().messages.find((m) => m.id === assistantId)?.content?.trim() || '';
+    if (current.endsWith('（已中止）')) return;
+    replaceAssistantMessage(assistantId, current ? `${current}\n\n（已中止）` : '（已中止）');
+  };
+
+  const handleAbortGeneration = () => {
+    if (!isGenerating) return;
+    void window.electronAPI.report.abortGeneration(sessionKey).catch(() => {});
+    setIsGenerating(false);
+    if (lastAssistantId) {
+      markAssistantAborted(lastAssistantId);
+    }
+  };
+
+  const runAssistantForUserText = async (
+    userContent: string,
+    assistantId: string,
+    contextSql?: string | null
+  ) => {
     if (!projectId || !dataSourceId || !dbType) return;
 
     try {
@@ -364,9 +396,14 @@ export default function ReportPage() {
         dbType,
         message: userContent,
         selectedTables,
+        contextSql: contextSql || undefined,
       });
 
       if (!result.success) {
+        if (result.cancelled) {
+          markAssistantAborted(assistantId);
+          return;
+        }
         replaceAssistantMessage(assistantId, `❌ ${result.message}`);
         return;
       }
@@ -465,7 +502,8 @@ export default function ReportPage() {
     }
 
     setFormDescription('');
-    if (currentSql) {
+    const sqlContext = currentSql;
+    if (sqlContext) {
       setCurrentSql(null);
       setCurrentQueryResult(null);
     }
@@ -479,11 +517,13 @@ export default function ReportPage() {
     const assistantId = `msg_${now}_ai`;
     addMessage(userMsg);
     addMessage({ id: assistantId, role: 'assistant', content: '', timestamp: now });
+    streamingAssistantIdRef.current = assistantId;
     setIsGenerating(true);
 
     try {
-      await runAssistantForUserText(userContent, assistantId);
+      await runAssistantForUserText(userContent, assistantId, sqlContext);
     } finally {
+      streamingAssistantIdRef.current = null;
       setIsGenerating(false);
       textareaRef.current?.focus();
     }
@@ -496,14 +536,17 @@ export default function ReportPage() {
     if (userMsg.role !== 'user') return;
 
     replaceAssistantMessage(assistantId, '');
-    if (currentSql) {
+    const sqlContext = currentSql;
+    if (sqlContext) {
       setCurrentSql(null);
       setCurrentQueryResult(null);
     }
+    streamingAssistantIdRef.current = assistantId;
     setIsGenerating(true);
     try {
-      await runAssistantForUserText(userMsg.content, assistantId);
+      await runAssistantForUserText(userMsg.content, assistantId, sqlContext);
     } finally {
+      streamingAssistantIdRef.current = null;
       setIsGenerating(false);
       textareaRef.current?.focus();
     }
@@ -1171,30 +1214,33 @@ export default function ReportPage() {
                 ×
               </button>
             )}
-            <button
-              onClick={handleSend}
-              disabled={
-                (!formDescription.trim() && !attachedFile) || isGenerating || parsingAttachment
-              }
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all self-end disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500 disabled:opacity-40 disabled:shadow-none bg-blue-500 text-white hover:bg-blue-600 hover:shadow-md"
-            >
-              {parsingAttachment ? (
-                <>
-                  <SpinnerIcon />
-                  解析附件...
-                </>
-              ) : isGenerating ? (
-                <>
-                  <SpinnerIcon />
-                  生成中...
-                </>
-              ) : (
-                <>
-                  发送
-                  <SendIcon />
-                </>
-              )}
-            </button>
+            {isGenerating ? (
+              <button
+                type="button"
+                onClick={handleAbortGeneration}
+                className="inline-flex items-center gap-1.5 self-end rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition-all hover:bg-red-100"
+              >
+                中止
+              </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={(!formDescription.trim() && !attachedFile) || parsingAttachment}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all self-end disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500 disabled:opacity-40 disabled:shadow-none bg-blue-500 text-white hover:bg-blue-600 hover:shadow-md"
+              >
+                {parsingAttachment ? (
+                  <>
+                    <SpinnerIcon />
+                    解析附件...
+                  </>
+                ) : (
+                  <>
+                    发送
+                    <SendIcon />
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       </main>

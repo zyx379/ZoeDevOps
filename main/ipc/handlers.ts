@@ -50,7 +50,16 @@ import { getOracleTables, executeOracleQuery, testOracleConnection } from '../da
 import { getDamengTables, executeDamengQuery, testDamengConnection } from '../database/dameng';
 import { testRedisConnection, getTokensFromRedis, getFirstTokenFromRedis } from '../redis';
 import { updateGitLabConfig } from '../agent/tools/gitLab';
-import { getOrCreateReportSession, clearReportSession, validateSql } from '../report';
+import { ApiClient } from '../api-client';
+import { compareRequirementVersions, RequirementCompareRequest } from '../requirements/versionCompare';
+import {
+  getOrCreateReportSession,
+  clearReportSession,
+  validateSql,
+  isReportGenerationAborted,
+} from '../report';
+
+const reportGenerationAbortControllers = new Map<string, AbortController>();
 import {
   getReportHistory,
   saveReportHistory,
@@ -851,10 +860,35 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('api:getModuleVersions', async (_event, config: any) => {
     try {
-      return { success: false, message: 'getModuleVersions not implemented' };
+      const client = new ApiClient({
+        baseUrl: config.baseUrl,
+        versionPath: config.versionPath,
+        apiKey: config.apiKey,
+        authType: config.authType,
+        customHeaderName: config.customHeaderName,
+      });
+      if (config.token) {
+        client.setToken(config.token);
+      }
+      const modules = await client.getModuleVersions();
+      return { success: true, modules };
     } catch (error) {
       console.error('Error getting module versions:', error);
-      throw error;
+      return { success: false, modules: [], message: (error as Error).message };
+    }
+  });
+
+  ipcMain.handle('requirements:compareVersions', async (_event, params: RequirementCompareRequest) => {
+    try {
+      return await compareRequirementVersions(params);
+    } catch (error) {
+      console.error('Error comparing requirement versions:', error);
+      return {
+        success: false,
+        rows: [],
+        services: [],
+        message: (error as Error).message || '需求版本比对失败',
+      };
     }
   });
 
@@ -903,6 +937,7 @@ export function registerIpcHandlers() {
     message: string;
     resetSession?: boolean;
     selectedTables?: string[];
+    contextSql?: string;
   }) => {
     try {
       const globalConfig = getGlobalConfig();
@@ -925,23 +960,46 @@ export function registerIpcHandlers() {
         throw new Error('未找到主窗口');
       }
 
-      const result = await session.sendMessage(
-        params.message,
-        (chunk) => {
-          mainWindow.webContents.send('report:streamChunk', { sessionKey: params.sessionKey, chunk });
-        },
-        params.selectedTables || []
-      );
+      reportGenerationAbortControllers.get(params.sessionKey)?.abort();
+      const abortController = new AbortController();
+      reportGenerationAbortControllers.set(params.sessionKey, abortController);
 
-      return {
-        success: true,
-        content: result.content,
-        conversation: session.getConversation(),
-      };
+      try {
+        const result = await session.sendMessage(
+          params.message,
+          (content) => {
+            mainWindow.webContents.send('report:streamChunk', {
+              sessionKey: params.sessionKey,
+              content,
+            });
+          },
+          params.selectedTables || [],
+          params.contextSql,
+          abortController.signal
+        );
+
+        return {
+          success: true,
+          content: result.content,
+          conversation: session.getConversation(),
+        };
+      } finally {
+        if (reportGenerationAbortControllers.get(params.sessionKey) === abortController) {
+          reportGenerationAbortControllers.delete(params.sessionKey);
+        }
+      }
     } catch (error) {
+      if (isReportGenerationAborted(error)) {
+        return { success: false, cancelled: true, message: '已中止' };
+      }
       console.error('Report chat error:', error);
       return { success: false, message: (error as Error).message || '对话失败' };
     }
+  });
+
+  ipcMain.handle('report:abortGeneration', async (_event, sessionKey: string) => {
+    reportGenerationAbortControllers.get(sessionKey)?.abort();
+    return { success: true };
   });
 
   ipcMain.handle('report:executeQuery', async (_event, params: {

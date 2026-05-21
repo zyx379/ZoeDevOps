@@ -8,8 +8,10 @@ export interface QueryResultData {
 }
 
 export function extractSqlFromMarkdown(content: string): string | null {
-  const match = content.match(/```sql\s*([\s\S]*?)```/i);
-  return match ? match[1].trim() : null;
+  const closed = content.match(/```sql\s*([\s\S]*?)```/i);
+  if (closed) return closed[1].trim();
+  const open = content.match(/```sql\s*([\s\S]*)$/i);
+  return open ? open[1].trim() : null;
 }
 
 export function extractTitleFromMarkdown(content: string): string {

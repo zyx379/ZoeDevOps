@@ -58,7 +58,7 @@
     "appId": "com.zoe.devops",
     "productName": "ZoeDevOps",
     "directories": {
-      "output": "release"
+      "output": "release_new"
     },
     "extraResources": [
       {
@@ -72,12 +72,17 @@
     "win": {
       "target": [
         {
-          "target": "dir",
+          "target": "portable",
           "arch": [
             "x64"
           ]
         }
-      ]
-    }
+      ],
+      "signAndEditExecutable": false,
+      "signingHashAlgorithms": [],
+      "certificateFile": null,
+      "certificatePassword": null
+    },
+    "publish": null
   }
 }

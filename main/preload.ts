@@ -159,6 +159,31 @@ export interface AnalyzedLogInfo {
   originalLog: any;
 }
 
+export type RequirementStatus = '已通过' | '未通过' | '审核中' | '未标注';
+
+export interface RequirementCompareRow {
+  id: string;
+  author: string;
+  title: string;
+  modules: string[];
+  services: string[];
+  lastCommittedAt: string;
+  status: RequirementStatus;
+  commitUrl?: string;
+  commitIds: string[];
+}
+
+export interface RequirementCompareServiceResult {
+  serviceName: string;
+  targetVersion: string;
+  onlineVersion?: string;
+  compareFromRef?: string;
+  compareToRef?: string;
+  repositories: string[];
+  commitCount: number;
+  error?: string;
+}
+
 export interface ElectronAPI {
   getDataSources: () => Promise<any[]>;
   createDataSource: (ds: any) => Promise<any>;
@@ -188,6 +213,7 @@ export interface ElectronAPI {
   sendChatMessage: (projectId: string, message: string) => Promise<{ success: boolean; content?: string; message?: string }>;
   report: {
     sendMessage: (params: any) => Promise<any>;
+    abortGeneration: (sessionKey: string) => Promise<any>;
     executeQuery: (params: any) => Promise<any>;
     validateSql: (sql: string, mode?: string) => Promise<any>;
     validateJoin: (params: any) => Promise<any>;
@@ -211,7 +237,7 @@ export interface ElectronAPI {
       base64: string,
       fileName: string
     ) => Promise<any>;
-    onStreamChunk: (callback: (data: { sessionKey: string; chunk: string }) => void) => () => void;
+    onStreamChunk: (callback: (data: { sessionKey: string; content: string }) => void) => () => void;
   };
   onChatStreamChunk: (callback: (data: { projectId: string; chunk: string }) => void) => () => void;
   testRedisConnection: (config: RedisConfig) => Promise<{ success: boolean; message: string }>;
@@ -234,6 +260,17 @@ export interface ElectronAPI {
     authType?: 'bearer' | 'api-key' | 'custom';
     customHeaderName?: string;
   }) => Promise<{ success: boolean; total: number; logs: AnalyzedLogInfo[]; message?: string }>;
+  requirements: {
+    compareVersions: (params: {
+      projectId: string;
+      inputText: string;
+    }) => Promise<{
+      success: boolean;
+      rows: RequirementCompareRow[];
+      services: RequirementCompareServiceResult[];
+      message?: string;
+    }>;
+  };
   getCodeRepositories: (projectId: string) => Promise<CodeRepository[]>;
   getCodeRepositoryById: (id: string) => Promise<CodeRepository | undefined>;
   createCodeRepository: (repo: Omit<CodeRepository, 'id' | 'createdAt' | 'updatedAt'>) => Promise<CodeRepository>;
@@ -318,6 +355,7 @@ const api: ElectronAPI = {
   sendChatMessage: (projectId, message) => ipcRenderer.invoke('chat:sendMessage', projectId, message),
   report: {
     sendMessage: (params) => ipcRenderer.invoke('report:sendMessage', params),
+    abortGeneration: (sessionKey: string) => ipcRenderer.invoke('report:abortGeneration', sessionKey),
     executeQuery: (params) => ipcRenderer.invoke('report:executeQuery', params),
     validateSql: (sql, mode) => ipcRenderer.invoke('report:validateSql', sql, mode),
     validateJoin: (params) => ipcRenderer.invoke('report:validateJoin', params),
@@ -339,7 +377,7 @@ const api: ElectronAPI = {
     parseAttachment: (kind, base64, fileName) =>
       ipcRenderer.invoke('report:parseAttachment', kind, base64, fileName),
     onStreamChunk: (callback) => {
-      const handler = (_: any, data: { sessionKey: string; chunk: string }) => callback(data);
+      const handler = (_: any, data: { sessionKey: string; content: string }) => callback(data);
       ipcRenderer.on('report:streamChunk', handler);
       return () => ipcRenderer.removeListener('report:streamChunk', handler);
     },
@@ -354,6 +392,9 @@ const api: ElectronAPI = {
   getRedisFirstToken: (config, prefix) => ipcRenderer.invoke('redis:getFirstToken', config, prefix),
   getModuleVersions: (config) => ipcRenderer.invoke('api:getModuleVersions', config),
   getLogs: (config) => ipcRenderer.invoke('api:getLogs', config),
+  requirements: {
+    compareVersions: (params) => ipcRenderer.invoke('requirements:compareVersions', params),
+  },
   getCodeRepositories: (projectId) => ipcRenderer.invoke('db:getCodeRepositories', projectId),
   getCodeRepositoryById: (id) => ipcRenderer.invoke('db:getCodeRepositoryById', id),
   createCodeRepository: (repo) => ipcRenderer.invoke('db:createCodeRepository', repo),

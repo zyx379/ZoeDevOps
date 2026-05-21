@@ -72,6 +72,7 @@ export class DeepSeekClient {
       tools?: boolean;
       stream?: boolean;
       onChunk?: (chunk: StreamChunk) => void;
+      signal?: AbortSignal;
     }
   ): Promise<ChatCompletionResponse> {
     const url = `${this.baseUrl}/chat/completions`;
@@ -118,6 +119,7 @@ export class DeepSeekClient {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(requestBody),
+      signal: options?.signal,
     });
 
     if (!response.ok) {
@@ -126,7 +128,7 @@ export class DeepSeekClient {
     }
 
     if (options?.stream) {
-      return await this.handleStreamResponse(response, options.onChunk);
+      return await this.handleStreamResponse(response, options.onChunk, options.signal);
     }
 
     return await response.json() as ChatCompletionResponse;
@@ -134,7 +136,8 @@ export class DeepSeekClient {
 
   private async handleStreamResponse(
     response: Response,
-    onChunk?: (chunk: StreamChunk) => void
+    onChunk?: (chunk: StreamChunk) => void,
+    signal?: AbortSignal
   ): Promise<ChatCompletionResponse> {
     const reader = response.body?.getReader();
     if (!reader) {
@@ -144,11 +147,19 @@ export class DeepSeekClient {
     const decoder = new TextDecoder();
     let buffer = '';
     let fullContent = '';
+    let finishReason = 'stop';
     const toolCallsMap = new Map<string, any>();
     const readerId = `chatcmpl-${Date.now()}`;
 
+    const abortIfNeeded = () => {
+      if (signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+    };
+
     try {
       while (true) {
+        abortIfNeeded();
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -164,6 +175,8 @@ export class DeepSeekClient {
 
           try {
             const chunk: StreamChunk = JSON.parse(data);
+            const chunkFinish = chunk.choices[0]?.finish_reason;
+            if (chunkFinish) finishReason = chunkFinish;
             
             if (onChunk) {
               onChunk(chunk);
@@ -207,6 +220,13 @@ export class DeepSeekClient {
           }
         }
       }
+    } catch (e) {
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
+      throw e;
     } finally {
       reader.releaseLock();
     }
@@ -236,7 +256,7 @@ export class DeepSeekClient {
             }
           })) : undefined,
         },
-        finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+        finish_reason: toolCalls.length > 0 ? 'tool_calls' : finishReason,
       }],
     };
   }

@@ -63,6 +63,31 @@ export interface AnalyzedLogInfo {
   originalLog: any;
 }
 
+export type RequirementStatus = '已通过' | '未通过' | '审核中' | '未标注';
+
+export interface RequirementCompareRow {
+  id: string;
+  author: string;
+  title: string;
+  modules: string[];
+  services: string[];
+  lastCommittedAt: string;
+  status: RequirementStatus;
+  commitUrl?: string;
+  commitIds: string[];
+}
+
+export interface RequirementCompareServiceResult {
+  serviceName: string;
+  targetVersion: string;
+  onlineVersion?: string;
+  compareFromRef?: string;
+  compareToRef?: string;
+  repositories: string[];
+  commitCount: number;
+  error?: string;
+}
+
 export interface CodeRepository {
   id: string;
   projectId: string;
@@ -147,6 +172,17 @@ export interface ElectronAPI {
     authType?: 'bearer' | 'api-key' | 'custom';
     customHeaderName?: string;
   }) => Promise<{ success: boolean; total: number; logs: AnalyzedLogInfo[]; message?: string }>;
+  requirements: {
+    compareVersions: (params: {
+      projectId: string;
+      inputText: string;
+    }) => Promise<{
+      success: boolean;
+      rows: RequirementCompareRow[];
+      services: RequirementCompareServiceResult[];
+      message?: string;
+    }>;
+  };
   getCodeRepositories: (projectId: string) => Promise<CodeRepository[]>;
   getCodeRepositoryById: (id: string) => Promise<CodeRepository | undefined>;
   createCodeRepository: (repo: Omit<CodeRepository, 'id' | 'createdAt' | 'updatedAt'>) => Promise<CodeRepository>;
@@ -184,7 +220,15 @@ export interface ElectronAPI {
       message: string;
       resetSession?: boolean;
       selectedTables?: string[];
-    }) => Promise<{ success: boolean; content?: string; conversation?: any[]; message?: string }>;
+      contextSql?: string;
+    }) => Promise<{
+      success: boolean;
+      content?: string;
+      conversation?: any[];
+      message?: string;
+      cancelled?: boolean;
+    }>;
+    abortGeneration: (sessionKey: string) => Promise<{ success: boolean }>;
     executeQuery: (params: {
       sessionKey: string;
       projectId: string;
@@ -214,7 +258,7 @@ export interface ElectronAPI {
       base64: string,
       fileName: string
     ) => Promise<any>;
-    onStreamChunk: (callback: (data: { sessionKey: string; chunk: string }) => void) => () => void;
+    onStreamChunk: (callback: (data: { sessionKey: string; content: string }) => void) => () => void;
   };
 }
 

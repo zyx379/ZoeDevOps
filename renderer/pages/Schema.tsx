@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import DataSources from './DataSources';
 import ReportPage from './Report';
+import RequirementsPage from './Requirements';
 import { useDataSourceStore, TableInfo, TableColumn, SavedConditionJoin } from '../stores/dataSourceStore';
 import { useAnalysisStore } from '../stores/analysisStore';
 import { useProjectStore } from '../stores/projectStore';
@@ -103,8 +104,8 @@ function whereSqlFromRows(rows: QueryConditionRow[]): string {
 }
 
 function Schema() {
-  // 主导航标签: 'query' | 'datasources' | 'analysis' | 'report'
-  const [activeMainTab, setActiveMainTab] = useState<'query' | 'datasources' | 'analysis' | 'report'>('query');
+  // 主导航标签: 'query' | 'datasources' | 'analysis' | 'report' | 'requirements'
+  const [activeMainTab, setActiveMainTab] = useState<'query' | 'datasources' | 'analysis' | 'report' | 'requirements'>('query');
   const [showRefreshModal, setShowRefreshModal] = useState(false);
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTabKey, setActiveTabKey] = useState<string | null>(null);
@@ -709,6 +710,17 @@ function Schema() {
             <span>AI报表</span>
           </button>
           <button
+            onClick={() => setActiveMainTab('requirements')}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all duration-200 flex items-center gap-1.5 ${
+              activeMainTab === 'requirements'
+                ? 'bg-blue-500 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            <span>🧾</span>
+            <span>需求管理</span>
+          </button>
+          <button
             onClick={() => setActiveMainTab('datasources')}
             className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all duration-200 flex items-center gap-1.5 ${
               activeMainTab === 'datasources'
@@ -731,6 +743,8 @@ function Schema() {
         <AnalysisPage />
       ) : activeMainTab === 'report' ? (
         <ReportPage />
+      ) : activeMainTab === 'requirements' ? (
+        <RequirementsPage />
       ) : (
         <div className="flex-1 flex">
           {/* 表列表 */}

@@ -405,10 +405,28 @@ ${logPrompt}
         },
       ];
 
+      // 安全截断消息：确保 tool 消息不会被孤立（必须有前置的 assistant(tool_calls)）
+      const filteredMessages = finalMessages.filter(
+        m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool'
+      );
+      const truncatedMessages = filteredMessages.slice(-15);
+
+      // 如果截断后的第一条是 tool 消息，往前补充其对应的 assistant(tool_calls) 消息
+      if (truncatedMessages.length > 0 && truncatedMessages[0].role === 'tool') {
+        const firstToolIdx = filteredMessages.indexOf(truncatedMessages[0]);
+        // 往前找到最近的 assistant 消息（带 toolCalls 的）
+        for (let i = firstToolIdx - 1; i >= 0; i--) {
+          if (filteredMessages[i].role === 'assistant' && filteredMessages[i].toolCalls?.length) {
+            truncatedMessages.unshift(filteredMessages[i]);
+            break;
+          }
+        }
+      }
+
       const conclusionResponse = await this.deepseekClient.chat(
         [
           { role: 'system', content: SYSTEM_PROMPT },
-          ...finalMessages.filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool').slice(-15),
+          ...truncatedMessages,
         ],
         { tools: false, temperature: 0.3 }
       );
