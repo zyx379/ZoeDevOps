@@ -8,7 +8,7 @@ export class ChatSession {
   private deepseekClient: DeepSeekClient;
   private conversation: ConversationMessage[];
   private context: ToolExecutionContext;
-  private maxIterations = 5;
+  private maxIterations = 10;
 
   constructor(
     analysisConversation: ConversationMessage[],

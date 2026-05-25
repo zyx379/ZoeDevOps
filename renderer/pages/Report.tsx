@@ -330,10 +330,11 @@ export default function ReportPage() {
 
   useEffect(() => {
     if (!window.electronAPI?.report) return;
-    return window.electronAPI.report.onStreamChunk(({ sessionKey: sk, content }) => {
+    return window.electronAPI.report.onStreamChunk(({ sessionKey: sk, requestId, content }) => {
       if (sk !== sessionKey) return;
       const assistantId = streamingAssistantIdRef.current;
       if (!assistantId) return;
+      if (requestId && requestId !== assistantId) return;
       replaceAssistantMessage(assistantId, content);
     });
   }, [sessionKey, replaceAssistantMessage]);
@@ -397,6 +398,7 @@ export default function ReportPage() {
         message: userContent,
         selectedTables,
         contextSql: contextSql || undefined,
+        requestId: assistantId,
       });
 
       if (!result.success) {
@@ -554,9 +556,13 @@ export default function ReportPage() {
 
   const handleCopyAssistant = async (msg: ReportMessage) => {
     const text = msg.content.replace(/```[\s\S]*?```/g, '').trim() || msg.content;
-    await copyToClipboard(text);
-    setCopiedId(msg.id);
-    setTimeout(() => setCopiedId(null), 2000);
+    try {
+      await copyToClipboard(text);
+      setCopiedId(msg.id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      showToast('复制失败，请先点击页面再试');
+    }
   };
 
   const handleExecuteSql = async (sql?: string) => {
@@ -984,8 +990,12 @@ export default function ReportPage() {
                 </button>
                 <button
                   onClick={async () => {
-                    await copyToClipboard(currentSql);
-                    showToast('SQL 已复制');
+                    try {
+                      await copyToClipboard(currentSql);
+                      showToast('SQL 已复制');
+                    } catch {
+                      showToast('复制失败，请先点击页面再试');
+                    }
                   }}
                   className="px-3 py-1.5 border text-sm rounded hover:bg-gray-50"
                 >

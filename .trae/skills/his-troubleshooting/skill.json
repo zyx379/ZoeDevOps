@@ -1,0 +1,23 @@
+{
+  "name": "his-troubleshooting",
+  "description": "HIS系统智能运维排查助手，支持日志分析、SQL诊断、代码定位",
+  "version": "1.0.0",
+  "author": "zoe-devops",
+  "tags": ["HIS", "运维", "故障排查", "日志分析", "SQL诊断"],
+  "tools": [
+    "query_log",
+    "query_sql_log",
+    "query_rpc_log",
+    "query_param_log",
+    "query_normal_log",
+    "query_business_data",
+    "get_table_schema"
+  ],
+  "prompt_file": "prompt.md",
+  "examples_dir": "examples",
+  "mcp_server": {
+    "name": "zoe-devops-mcp",
+    "command": "node",
+    "args": ["mcp-server/dist/index.js"]
+  }
+}

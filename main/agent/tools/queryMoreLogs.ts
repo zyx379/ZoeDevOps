@@ -1,6 +1,5 @@
-import { ApiClient, LogQueryParam } from '../../api-client';
-import { getProjectConfig } from '../../database/sqlite';
 import { ToolResult } from '../types';
+import { buildBaseLogQuery, createLogApiClient, summarizeEvidence } from './logUtils';
 
 export async function queryMoreLogs(
   args: {
@@ -16,54 +15,21 @@ export async function queryMoreLogs(
   apiLogPath?: string
 ): Promise<ToolResult> {
   try {
-    let configToUse: { baseUrl: string; logPath?: string } | undefined;
-    let tokenToUse: string | undefined;
-
-    if (apiBaseUrl && apiLogPath) {
-      configToUse = { baseUrl: apiBaseUrl, logPath: apiLogPath };
-      tokenToUse = apiToken;
-    } else {
-      const projectConfig = getProjectConfig(projectId);
-      if (projectConfig && projectConfig.apiBaseUrl && projectConfig.apiLogPath) {
-        configToUse = {
-          baseUrl: projectConfig.apiBaseUrl,
-          logPath: projectConfig.apiLogPath,
-        };
-      }
-    }
-
-    if (!configToUse) {
+    const apiClient = await createLogApiClient({ projectId, apiBaseUrl, apiToken, apiLogPath });
+    if (!apiClient) {
       return { success: false, error: '项目未配置 API，无法查询日志' };
     }
 
-    const apiClient = new ApiClient(configToUse);
-    if (tokenToUse) {
-      apiClient.setToken(tokenToUse);
-    }
-
-    const queryParam: LogQueryParam = {
+    const queryParam = buildBaseLogQuery({
       pageSize: '20',
-      pageNum: '1',
       indexvalue: 'log-http*',
       logType: 'http',
       serviceName: args.serviceName || '',
-      canary: '',
       traceId: args.traceId || '',
       logLevel: args.logLevel || [],
-      timestamp: {
-        startDate: args.timeRange?.startDate || null,
-        endDate: args.timeRange?.endDate || null
-      },
-      filterParam: {
-        searchType: '2',
-        termChecked: false,
-        matchChecked: true,
-        wildcardChecked: false,
-        operator: '',
-        value: '',
-        searchValue: args.keyword || args.traceId || ''
-      }
-    };
+      keyword: args.keyword || args.traceId || '',
+      timeRange: args.timeRange,
+    });
 
     console.log('queryMoreLogs queryParam:', JSON.stringify(queryParam, null, 2));
 
@@ -96,6 +62,7 @@ export async function queryMoreLogs(
         logs: sortedLogs,
         errorCount: errorLogs.length,
         totalCount: sortedLogs.length,
+        evidence: summarizeEvidence(errorLogs.length > 0 ? errorLogs : sortedLogs, 15),
         summary: sortedLogs.slice(0, 5).map(l => ({
           logLevel: l.logLevel,
           serviceName: l.serviceName,

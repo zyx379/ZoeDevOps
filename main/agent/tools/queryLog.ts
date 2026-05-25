@@ -1,7 +1,5 @@
-import { ApiClient, LogQueryParam } from '../../api-client';
-import { getProjectConfig } from '../../database/sqlite';
-import { getFirstTokenFromRedis, RedisConfig } from '../../redis';
 import { ToolResult } from '../types';
+import { buildBaseLogQuery, createLogApiClient, summarizeEvidence } from './logUtils';
 
 export async function queryLog(
   args: { logId: string; tableName?: string },
@@ -12,64 +10,18 @@ export async function queryLog(
   apiTokenPath?: string
 ): Promise<ToolResult> {
   try {
-    let configToUse: { baseUrl: string; logPath?: string } | undefined;
-    let tokenToUse: string | undefined;
-
-    if (apiBaseUrl && apiLogPath) {
-      configToUse = { baseUrl: apiBaseUrl, logPath: apiLogPath };
-      tokenToUse = apiToken;
-    } else {
-      const projectConfig = getProjectConfig(projectId);
-      if (projectConfig && projectConfig.apiBaseUrl && projectConfig.apiLogPath) {
-        configToUse = {
-          baseUrl: projectConfig.apiBaseUrl,
-          logPath: projectConfig.apiLogPath,
-        };
-      }
-    }
-
-    if (!tokenToUse) {
-      const projectConfig = getProjectConfig(projectId);
-      if (projectConfig && projectConfig.redisHost && projectConfig.redisPort) {
-        const redisConfig: RedisConfig = {
-            host: projectConfig.redisHost!,
-            port: projectConfig.redisPort!,
-            password: projectConfig.redisPassword || undefined,
-            db: projectConfig.redisDb || undefined,
-          };
-          tokenToUse = await getFirstTokenFromRedis(redisConfig) ?? undefined;
-      }
-    }
-
-    if (!configToUse) {
+    const apiClient = await createLogApiClient({ projectId, apiBaseUrl, apiToken, apiLogPath });
+    if (!apiClient) {
       return { success: false, error: '项目未配置 API，无法查询日志' };
     }
 
-    const apiClient = new ApiClient(configToUse);
-    if (tokenToUse) {
-      apiClient.setToken(tokenToUse);
-    }
-
-    const queryParam: LogQueryParam = {
-      pageSize: '50',
-      pageNum: '1',
+    const queryParam = buildBaseLogQuery({
+      pageSize: '20',
       indexvalue: 'log-http*',
       logType: 'http',
-      serviceName: '',
-      canary: '',
       traceId: args.logId,
-      logLevel: [],
-      timestamp: { startDate: null, endDate: null },
-      filterParam: {
-        searchType: '2',
-        termChecked: false,
-        matchChecked: true,
-        wildcardChecked: false,
-        operator: '',
-        value: '',
-        searchValue: args.logId
-      }
-    };
+      keyword: args.logId,
+    });
 
     console.log('queryLog queryParam:', JSON.stringify(queryParam, null, 2));
 
@@ -94,6 +46,7 @@ export async function queryLog(
         allLogs: allLogs,
         errorLogs: errorLogs,
         logs: allLogs,
+        evidence: summarizeEvidence(errorLogs.length > 0 ? errorLogs : allLogs, 12),
       }
     };
   } catch (error) {

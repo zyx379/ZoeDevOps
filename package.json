@@ -11,13 +11,16 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder",
+    "dist": "npm run seed:heat-init && npm run seed:export && npm run seed:verify && npm run build && electron-builder",
     "typecheck": "tsc --noEmit",
     "test:sql": "npm run build:main && node dist/main/report/sqlValidator.test.js",
     "test:attachment": "npm run build:main && node dist/main/report/attachmentParser.test.js",
     "test:ds-validation": "npx --yes tsx renderer/utils/dsFormValidation.test.ts",
     "test:report-attachment": "npx --yes tsx renderer/utils/reportAttachment.test.ts",
-    "seed:export": "npx --yes tsx scripts/exportPortableSeed.ts"
+    "test:log-utils": "npx --yes tsx main/agent/tools/logUtils.test.ts",
+    "seed:export": "npx --yes tsx scripts/exportPortableSeed.ts",
+    "seed:heat-init": "npx --yes tsx scripts/initTableHeatFromBusinessRules.ts",
+    "seed:verify": "npx --yes tsx scripts/verifyPortableSeed.ts"
   },
   "dependencies": {
     "@types/ioredis": "^4.28.10",

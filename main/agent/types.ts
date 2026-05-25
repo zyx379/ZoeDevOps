@@ -73,7 +73,16 @@ export interface ConversationMessage {
   name?: string;
 }
 
-export type ToolName = 'query_log' | 'get_code' | 'query_business_data' | 'query_more_logs' | 'get_table_schema';
+export type ToolName =
+  | 'query_log'
+  | 'get_code'
+  | 'query_business_data'
+  | 'query_more_logs'
+  | 'get_table_schema'
+  | 'query_sql_log'
+  | 'query_rpc_log'
+  | 'query_param_log'
+  | 'query_normal_log';
 
 export type AnalysisStepId =
   | 'query_log'

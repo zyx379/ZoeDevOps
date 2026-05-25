@@ -237,7 +237,7 @@ export interface ElectronAPI {
       base64: string,
       fileName: string
     ) => Promise<any>;
-    onStreamChunk: (callback: (data: { sessionKey: string; content: string }) => void) => () => void;
+    onStreamChunk: (callback: (data: { sessionKey: string; requestId?: string; content: string }) => void) => () => void;
   };
   onChatStreamChunk: (callback: (data: { projectId: string; chunk: string }) => void) => () => void;
   testRedisConnection: (config: RedisConfig) => Promise<{ success: boolean; message: string }>;
@@ -377,7 +377,7 @@ const api: ElectronAPI = {
     parseAttachment: (kind, base64, fileName) =>
       ipcRenderer.invoke('report:parseAttachment', kind, base64, fileName),
     onStreamChunk: (callback) => {
-      const handler = (_: any, data: { sessionKey: string; content: string }) => callback(data);
+      const handler = (_: any, data: { sessionKey: string; requestId?: string; content: string }) => callback(data);
       ipcRenderer.on('report:streamChunk', handler);
       return () => ipcRenderer.removeListener('report:streamChunk', handler);
     },

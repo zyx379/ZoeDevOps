@@ -16,6 +16,7 @@ import { SYSTEM_PROMPT, SERVICE_IDENTIFY_PROMPT, DEEP_ANALYSIS_PROMPT } from './
 import {
   getProjectConfig,
   getCodeRepositoriesByProjectId,
+  getProjectDataSources,
   matchCodeRepository,
   inferBranchFromTag,
   getGlobalConfig,
@@ -24,11 +25,20 @@ import { getFirstTokenFromRedis, RedisConfig } from '../redis';
 import { ApiClient } from '../api-client';
 import { getCode } from './tools/gitLab';
 
+type ToolRunLogItem = {
+  name: string;
+  arguments: any;
+  success: boolean;
+  summary: string;
+  timestamp: string;
+};
+
 export class HISAnalysisAgent {
   private deepseekClient: DeepSeekClient;
   private maxIterations = 10;
   private callback: StepCallback | null = null;
   private context: ToolExecutionContext | null = null;
+  private toolRunLog: ToolRunLogItem[] = [];
 
   constructor() {
     this.deepseekClient = new DeepSeekClient();
@@ -36,6 +46,7 @@ export class HISAnalysisAgent {
 
   async runStepByStep(request: AnalysisRequest, callback: StepCallback): Promise<ConversationMessage[]> {
     this.callback = callback;
+    this.toolRunLog = [];
 
     // 从全局配置读取 AI 设置
     const globalConfig = getGlobalConfig();
@@ -59,6 +70,7 @@ export class HISAnalysisAgent {
     const apiLogPath = request.apiLogPath || projectConfig?.apiLogPath;
     const apiVersionPath = request.apiVersionPath || projectConfig?.apiVersionPath;
     const apiTokenPath = request.apiTokenPath || projectConfig?.apiTokenPath;
+    const projectDataSource = getProjectDataSources(request.projectId);
 
     let apiToken = request.apiToken;
     if (!apiToken && projectConfig?.redisHost && projectConfig?.redisPort) {
@@ -83,6 +95,7 @@ export class HISAnalysisAgent {
       apiTokenPath,
       apiVersionPath,
       logId: request.logId,
+      dataSourceId: projectDataSource?.id,
     };
 
     const conversation: ConversationMessage[] = [];
@@ -200,30 +213,29 @@ ${repos.map(r => `- ${r.name} (匹配模式: ${r.servicePatterns})`).join('\n')}
 
         const step3Complete = this.createStepData('match_repository', '📦 步骤 3：匹配代码仓库', noMatchDisplay, repositoryMatch);
         callback.onStepComplete(step3Complete);
-        return [];
-      }
+      } else {
+        repositoryMatch = {
+          matched: true,
+          repository: {
+            id: matchedRepo.id,
+            name: matchedRepo.name,
+            repositoryUrl: matchedRepo.repositoryUrl,
+            servicePatterns: matchedRepo.servicePatterns,
+            defaultBranch: matchedRepo.defaultBranch || 'master',
+          },
+          availableRepositories: repos.map(r => ({ name: r.name })),
+        };
 
-      repositoryMatch = {
-        matched: true,
-        repository: {
-          id: matchedRepo.id,
-          name: matchedRepo.name,
-          repositoryUrl: matchedRepo.repositoryUrl,
-          servicePatterns: matchedRepo.servicePatterns,
-          defaultBranch: matchedRepo.defaultBranch || 'master',
-        },
-        availableRepositories: repos.map(r => ({ name: r.name })),
-      };
-
-      const matchDisplay = `✅ 匹配成功！
+        const matchDisplay = `✅ 匹配成功！
 
 **匹配仓库**: ${matchedRepo.name}
 **仓库地址**: ${matchedRepo.repositoryUrl}
 **匹配模式**: ${matchedRepo.servicePatterns}
 **默认分支**: ${matchedRepo.defaultBranch || 'master'}`;
 
-      const step3Complete = this.createStepData('match_repository', '📦 步骤 3：匹配代码仓库', matchDisplay, repositoryMatch);
-      callback.onStepComplete(step3Complete);
+        const step3Complete = this.createStepData('match_repository', '📦 步骤 3：匹配代码仓库', matchDisplay, repositoryMatch);
+        callback.onStepComplete(step3Complete);
+      }
 
       // ===== 步骤4: 获取版本信息并拉取代码 =====
       const step4 = this.createStepData('fetch_version_and_code', '📥 步骤 4：获取版本信息并拉取代码');
@@ -232,9 +244,9 @@ ${repos.map(r => `- ${r.name} (匹配模式: ${r.servicePatterns})`).join('\n')}
 
       let versionTag = '';
       let moduleName = serviceIdentification.serviceName;
-      let inferredBranch = matchedRepo.defaultBranch || 'master';
+      let inferredBranch = matchedRepo?.defaultBranch || 'master';
 
-      if (apiBaseUrl && apiVersionPath && apiToken) {
+      if (matchedRepo && apiBaseUrl && apiVersionPath && apiToken) {
         try {
           const versionClient = new ApiClient({
             baseUrl: apiBaseUrl,
@@ -264,39 +276,50 @@ ${repos.map(r => `- ${r.name} (匹配模式: ${r.servicePatterns})`).join('\n')}
         }
       }
 
-      let codeResult: ToolResult;
-      if (versionTag) {
-        codeResult = await getCode(
-          serviceIdentification.serviceName,
-          undefined,
-          undefined,
+      if (matchedRepo) {
+        let codeResult: ToolResult;
+        if (versionTag) {
+          codeResult = await getCode(
+            serviceIdentification.serviceName,
+            undefined,
+            undefined,
+            versionTag,
+            request.projectId
+          );
+        } else {
+          codeResult = await getCode(
+            serviceIdentification.serviceName,
+            undefined,
+            inferredBranch,
+            undefined,
+            request.projectId
+          );
+        }
+
+        if (!codeResult.success) {
+          const errorMsg = codeResult.error || '代码获取失败';
+          callback.onStepError('fetch_version_and_code', errorMsg);
+          return [];
+        }
+
+        versionAndCode = {
           versionTag,
-          request.projectId
-        );
+          moduleName,
+          branch: codeResult.data?.branch || inferredBranch,
+          files: codeResult.data?.files || [],
+          totalFiles: codeResult.data?.totalFiles || 0,
+          repositoryName: codeResult.data?.repositoryName || matchedRepo.name,
+        };
       } else {
-        codeResult = await getCode(
-          serviceIdentification.serviceName,
-          undefined,
-          inferredBranch,
-          undefined,
-          request.projectId
-        );
+        versionAndCode = {
+          versionTag: '',
+          moduleName,
+          branch: '',
+          files: [],
+          totalFiles: 0,
+          repositoryName: '',
+        };
       }
-
-      if (!codeResult.success) {
-        const errorMsg = codeResult.error || '代码获取失败';
-        callback.onStepError('fetch_version_and_code', errorMsg);
-        return [];
-      }
-
-      versionAndCode = {
-        versionTag,
-        moduleName,
-        branch: codeResult.data?.branch || inferredBranch,
-        files: codeResult.data?.files || [],
-        totalFiles: codeResult.data?.totalFiles || 0,
-        repositoryName: codeResult.data?.repositoryName || matchedRepo.name,
-      };
 
       const displayFiles = versionAndCode.files.slice(0, 15);
       const codeFilesDisplay = displayFiles.length > 0
@@ -308,7 +331,7 @@ ${repos.map(r => `- ${r.name} (匹配模式: ${r.servicePatterns})`).join('\n')}
 
       const versionDisplay = `**匹配到的版本 Tag**: ${versionTag || '未获取到版本信息'}
 **推断的分支**: ${versionAndCode.branch}
-**仓库**: ${versionAndCode.repositoryName}
+**仓库**: ${versionAndCode.repositoryName || '未匹配，已降级为日志分析'}
 
 **代码文件列表** (共 ${versionAndCode.totalFiles} 个文件，显示前 ${Math.min(displayFiles.length, 15)} 个):
 ${codeFilesDisplay}${truncatedNote}`;
@@ -321,6 +344,13 @@ ${codeFilesDisplay}${truncatedNote}`;
       callback.onStepStart('deep_analysis');
       callback.onStepUpdate({ ...step5, status: 'loading' });
 
+      const evidencePlan = await this.collectTraceEvidence(
+        request,
+        logResult,
+        serviceIdentification,
+        repositoryMatch,
+        versionAndCode
+      );
       const logPrompt = buildToolPrompt('query_log', { logId: request.logId }, logResult);
       const contextPrompt = `## 分析上下文
 
@@ -334,14 +364,16 @@ ${codeFilesDisplay}${truncatedNote}`;
 - 建议方向: ${serviceIdentification.suggestedDirection}
 
 ### 匹配仓库
-- 仓库名: ${matchedRepo.name}
-- 仓库地址: ${matchedRepo.repositoryUrl}
+- 仓库名: ${repositoryMatch?.repository?.name || '未匹配'}
+- 仓库地址: ${repositoryMatch?.repository?.repositoryUrl || '无'}
 - 分支: ${versionAndCode.branch}
 
 ### 代码文件 (前20个)
 ${versionAndCode.files.slice(0, 20).join('\n')}
 
 ${logPrompt}
+
+${evidencePlan.summary}
 
 ## 排查链路（请严格按此顺序执行）
 
@@ -366,7 +398,10 @@ ${logPrompt}
 ## 可用工具
 - **get_code(serviceName, filePath, searchPattern: "方法名")**：精准搜索报错方法代码
 - **get_code(serviceName, filePath, startLine, endLine)**：按行号精确截取代码
+- **query_rpc_log(traceId)**：查询 RPC/Feign 调用链，识别真实下游服务
 - **query_sql_log(traceId, sqlId: "DAO方法名")**：★ 查询 DAO 方法实际执行的 SQL，traceId 填 \`"${request.logId}"\`
+- **query_param_log(traceId)**：查询业务参数/配置日志
+- **query_normal_log(traceId)**：查询控制台日志
 - **query_more_logs(serviceName, logLevel: ["ERROR"], traceId)**：查更多错误日志，traceId 填 \`"${request.logId}"\`
 - **get_table_schema(tableNamePattern)**：查看表结构
 - **query_business_data(sql, description)**：查询业务数据
@@ -385,6 +420,10 @@ ${logPrompt}
         .join('\n\n');
 
       const step5Complete = this.createStepData('deep_analysis', '🧠 步骤 5：深度分析', analysisContent || '分析完成', { conversation: analysisConversation });
+      step5Complete.data = {
+        conversation: analysisConversation,
+        toolRuns: this.toolRunLog,
+      };
       callback.onStepComplete(step5Complete);
 
       // ===== 步骤6: 结论 =====
@@ -405,37 +444,25 @@ ${logPrompt}
         },
       ];
 
-      // 安全截断消息：确保 tool 消息不会被孤立（必须有前置的 assistant(tool_calls)）
-      const filteredMessages = finalMessages.filter(
-        m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool'
-      );
-      const truncatedMessages = filteredMessages.slice(-15);
-
-      // 如果截断后的第一条是 tool 消息，往前补充其对应的 assistant(tool_calls) 消息
-      if (truncatedMessages.length > 0 && truncatedMessages[0].role === 'tool') {
-        const firstToolIdx = filteredMessages.indexOf(truncatedMessages[0]);
-        // 往前找到最近的 assistant 消息（带 toolCalls 的）
-        for (let i = firstToolIdx - 1; i >= 0; i--) {
-          if (filteredMessages[i].role === 'assistant' && filteredMessages[i].toolCalls?.length) {
-            truncatedMessages.unshift(filteredMessages[i]);
-            break;
-          }
-        }
-      }
+      const conclusionContext = this.buildConclusionContext(finalMessages);
 
       const conclusionResponse = await this.deepseekClient.chat(
         [
           { role: 'system', content: SYSTEM_PROMPT },
-          ...truncatedMessages,
+          ...conclusionContext,
         ],
         { tools: false, temperature: 0.3 }
       );
 
       const conclusion = conclusionResponse.choices[0]?.message?.content || '分析完成，请查看上述步骤获取详细信息。';
+      analysisConversation.push({
+        role: 'assistant',
+        content: `## 最终结论\n\n${conclusion}`,
+      });
       const step6Complete = this.createStepData('conclusion', '📋 步骤 6：分析结论', conclusion);
       callback.onStepComplete(step6Complete);
 
-      return conversation;
+      return analysisConversation;
 
     } catch (error) {
       const errorMsg = (error as Error).message || '分析过程发生未知错误';
@@ -522,6 +549,7 @@ ${logPrompt}
 
         const result = await executeTool(tc.name, tc.arguments, this.context!);
         const toolPrompt = buildToolPrompt(tc.name, tc.arguments, result);
+        this.recordToolRun(tc.name, tc.arguments, result, toolPrompt);
 
         const toolMsg = createToolResultMessage(
           tc.id || `call_${iterations}`,
@@ -533,6 +561,141 @@ ${logPrompt}
     }
 
     return conversation;
+  }
+
+  private async collectTraceEvidence(
+    request: AnalysisRequest,
+    logResult: ToolResult,
+    serviceIdentification: ServiceIdentification,
+    repositoryMatch: RepositoryMatchResult | null,
+    versionAndCode: VersionAndCodeResult | null
+  ): Promise<{ summary: string; toolRuns: ToolRunLogItem[] }> {
+    if (!this.context) {
+      return { summary: '', toolRuns: this.toolRunLog };
+    }
+
+    const forcedTools: Array<{ name: string; arguments: any }> = [
+      { name: 'query_rpc_log', arguments: { traceId: request.logId, serviceName: serviceIdentification.serviceName } },
+      { name: 'query_param_log', arguments: { traceId: request.logId, serviceName: serviceIdentification.serviceName } },
+      { name: 'query_normal_log', arguments: { traceId: request.logId, serviceName: serviceIdentification.serviceName, logLevel: ['ERROR', 'WARN'] } },
+    ];
+
+    const candidates = this.extractEvidenceCandidates(logResult.data);
+    const sqlId = candidates.sqlIds[0] || candidates.methodNames[0];
+    if (sqlId) {
+      forcedTools.push({ name: 'query_sql_log', arguments: { traceId: request.logId, sqlId } });
+    }
+
+    if (repositoryMatch?.matched && (candidates.methodNames[0] || candidates.classNames[0])) {
+      forcedTools.push({
+        name: 'get_code',
+        arguments: {
+          serviceName: serviceIdentification.serviceName,
+          searchPattern: candidates.methodNames[0] || candidates.classNames[0],
+          branch: versionAndCode?.branch || undefined,
+          tag: versionAndCode?.versionTag || undefined,
+        },
+      });
+    }
+
+    const evidenceSections: string[] = [];
+    for (const tool of forcedTools) {
+      const result = await executeTool(tool.name, tool.arguments, this.context);
+      const prompt = buildToolPrompt(tool.name, tool.arguments, result);
+      this.recordToolRun(tool.name, tool.arguments, result, prompt);
+      evidenceSections.push(prompt);
+    }
+
+    const candidateSummary = [
+      candidates.classNames.length ? `- 候选类: ${candidates.classNames.slice(0, 5).join(', ')}` : '',
+      candidates.methodNames.length ? `- 候选方法: ${candidates.methodNames.slice(0, 8).join(', ')}` : '',
+      candidates.sqlIds.length ? `- 候选 SQL ID: ${candidates.sqlIds.slice(0, 8).join(', ')}` : '',
+      candidates.errorCodes.length ? `- 错误码: ${candidates.errorCodes.slice(0, 5).join(', ')}` : '',
+    ].filter(Boolean).join('\n');
+
+    return {
+      summary: `## 程序化证据计划（已自动执行）
+
+${candidateSummary || '- 未从首批日志中提取到明确的类/方法/SQL ID，已按 traceId 补查 RPC、参数和控制台日志。'}
+
+${evidenceSections.join('\n\n')}`,
+      toolRuns: this.toolRunLog,
+    };
+  }
+
+  private extractEvidenceCandidates(data: any): {
+    classNames: string[];
+    methodNames: string[];
+    sqlIds: string[];
+    errorCodes: string[];
+  } {
+    const logs = [
+      ...(data?.errorLogs || []),
+      ...(data?.allLogs || []),
+      ...(data?.logs || []),
+    ];
+    const text = logs.map((log: any) => [
+      log.errorClass,
+      log.errorMessage,
+      log.stackTrace,
+      log.requestParams,
+      log.originalLog?.stack,
+      log.originalLog?.exMsg,
+      log.originalLog?.sqlId,
+      log.tags?.['mvc.controller.class'],
+      log.tags?.['mvc.controller.method'],
+    ].filter(Boolean).join('\n')).join('\n');
+
+    const classNames = this.uniqueMatches(text, /\b([a-zA-Z_][\w$]*(?:Controller|Service|ServiceImpl|Dao|DAO|Mapper))\b/g);
+    const methodNames = this.uniqueMatches(text, /(?:\.|#)([a-zA-Z_][\w$]{2,})\s*\(/g)
+      .filter(name => !['invoke', 'run', 'doFilter', 'proceed', 'execute'].includes(name));
+    const sqlIds = this.uniqueMatches(text, /\bsqlId["':=\s]+([a-zA-Z_][\w$.-]{2,})/g);
+    const errorCodes = this.uniqueMatches(text, /\b(ORA-\d{5}|DM-\d+|SQL-\d+)\b/g);
+
+    return { classNames, methodNames, sqlIds, errorCodes };
+  }
+
+  private uniqueMatches(text: string, pattern: RegExp): string[] {
+    const values: string[] = [];
+    for (const match of text.matchAll(pattern)) {
+      const value = match[1] || match[0];
+      if (value && !values.includes(value)) {
+        values.push(value);
+      }
+    }
+    return values;
+  }
+
+  private recordToolRun(toolName: string, args: any, result: ToolResult, prompt: string) {
+    this.toolRunLog.push({
+      name: toolName,
+      arguments: args,
+      success: result.success,
+      summary: result.success ? prompt.slice(0, 500) : (result.error || '执行失败'),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  private buildConclusionContext(messages: ConversationMessage[]): ConversationMessage[] {
+    const userMessages = messages.filter(m => m.role === 'user').slice(0, 1);
+    const toolMessages = messages
+      .filter(m => m.role === 'tool')
+      .map(m => ({
+        role: 'assistant' as const,
+        content: `工具证据 ${m.name || ''}:\n${m.content.slice(0, 1800)}`,
+      }))
+      .slice(-8);
+    const recentAssistant = messages
+      .filter(m => m.role === 'assistant' && m.content && !m.toolCalls?.length)
+      .slice(-5);
+    const finalUser = messages[messages.length - 1];
+
+    return [
+      ...userMessages,
+      ...toolMessages,
+      ...recentAssistant,
+      finalUser,
+    ].filter(Boolean);
   }
 
   private matchModuleVersion(

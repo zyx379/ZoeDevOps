@@ -1,5 +1,10 @@
 import { getSchemaCache } from '../database/sqlite';
-import { getTableHeatMap, TableHeatRecord } from '../database/reportStorage';
+import {
+  getTableHeatMap,
+  TableHeatRecord,
+  getTableRelationshipsByDs,
+  getSemanticFieldLearning,
+} from '../database/reportStorage';
 import { extractTableNamesFromSql } from './reportIntent';
 
 export interface SchemaTableSummary {
@@ -19,7 +24,7 @@ export function getSchemaTables(dataSourceId: string): SchemaTableSummary[] {
     tableName: t.tableName,
     comments: t.comments || '',
     owner: t.owner || '',
-    columns: (t.columns || []).slice(0, 40).map((c: any) => ({
+    columns: (t.columns || []).map((c: any) => ({
       name: c.columnName,
       type: c.dataType,
       comment: c.comments || '',
@@ -43,9 +48,122 @@ function tableHeatScore(heatMap: Map<string, TableHeatRecord>, tableName: string
   return heat.queryCount + heat.reportCount * 3 + heat.manualWeight;
 }
 
+const SEMANTIC_FIELD_ALIASES: { triggers: string[]; terms: string[]; label: string }[] = [
+  {
+    label: '手机号/联系电话',
+    triggers: ['手机号', '手机', '电话', '联系方式', '联系电话', '联系号码', '号码', 'phone', 'mobile', 'tel'],
+    terms: ['PHONE', 'MOBILE', 'TEL', 'CONTACT_PHONE', 'CONTACT_TEL', 'TELEPHONE', 'MOBILE_PHONE', 'PHONE_NO', 'TEL_NO', 'SJH', 'LXDH', 'LXHM'],
+  },
+  {
+    label: '医生',
+    triggers: ['医生', '医师', 'doctor', 'physician'],
+    terms: ['DOCTOR', 'DOC', 'YS', 'PHYSICIAN', 'CLINICIAN', 'DOCTOR_ID', 'DOCTOR_NO', 'DOCTOR_NAME', 'YSBH', 'YSDM', 'YSXM'],
+  },
+  {
+    label: '患者/病人',
+    triggers: ['患者', '病人', '就诊人', 'patient'],
+    terms: ['PATIENT', 'PAT', 'BR', 'PERSON', 'PATIENT_ID', 'PATIENT_NO', 'PATIENT_NAME', 'BRID', 'BRXM'],
+  },
+  {
+    label: '身份证',
+    triggers: ['身份证', '证件号', 'idcard', 'identity'],
+    terms: ['ID_CARD', 'IDCARD', 'CARD_NO', 'ID_NO', 'CERT_NO', 'IDENTITY_NO', 'SFZH', 'ZJHM'],
+  },
+];
+
+function expandSemanticKeywords(words: string[]): string[] {
+  const text = words.join(' ').toLowerCase();
+  const expanded = new Set(words);
+  for (const group of SEMANTIC_FIELD_ALIASES) {
+    if (group.triggers.some((t) => text.includes(t.toLowerCase()))) {
+      group.terms.forEach((term) => expanded.add(term));
+    }
+  }
+  return [...expanded];
+}
+
+function semanticColumnCandidates(tables: SchemaTableSummary[], userMessage: string): string {
+  const lower = userMessage.toLowerCase();
+  const sections: string[] = [];
+  for (const group of SEMANTIC_FIELD_ALIASES) {
+    if (!group.triggers.some((t) => lower.includes(t.toLowerCase()))) continue;
+    const terms = group.terms.map((t) => t.toUpperCase());
+    const matches: string[] = [];
+    for (const table of tables) {
+      for (const col of table.columns) {
+        const name = col.name.toUpperCase();
+        const comment = col.comment || '';
+        if (terms.some((term) => name.includes(term)) || group.triggers.some((t) => comment.includes(t))) {
+          matches.push(`${table.tableName}.${col.name}${col.comment ? `(${col.comment})` : ''}`);
+        }
+      }
+    }
+    if (matches.length > 0) {
+      sections.push(`【语义字段候选：${group.label}】\n${matches.slice(0, 80).map((m) => `- ${m}`).join('\n')}`);
+    }
+  }
+  return sections.join('\n\n');
+}
+
+const PHRASE_SPLIT_RE = /[\s,，。！？!?:：;；、()（）"'`]+/;
+const SEMANTIC_STOPWORDS = new Set([
+  '查询', '统计', '看看', '帮我', '一下', '数据', '信息', '明细', '列表', '按', '并且', '以及',
+  '今天', '昨天', '本周', '本月', '这个', '那个', '请', '给我', '展示',
+]);
+
+function extractBusinessPhrases(userMessage: string): string[] {
+  const raw = userMessage
+    .toLowerCase()
+    .replace(/[^\u4e00-\u9fa5a-z0-9_\s]/gi, ' ')
+    .split(PHRASE_SPLIT_RE)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 2 && !SEMANTIC_STOPWORDS.has(x));
+  return Array.from(new Set(raw)).slice(0, 20);
+}
+
+function buildLearnedSemanticContext(dataSourceId: string, userMessage: string, allTables: SchemaTableSummary[]): string {
+  const phrases = extractBusinessPhrases(userMessage);
+  if (phrases.length === 0) return '';
+  const learnings = getSemanticFieldLearning(dataSourceId, 300);
+  if (learnings.length === 0) return '';
+
+  const existingCols = new Set(
+    allTables.flatMap((t) =>
+      t.columns.map((c) => `${t.tableName.toUpperCase()}.${c.name.toUpperCase()}`)
+    )
+  );
+  const matched = learnings
+    .filter((l) => {
+      const phrase = l.userPhrase.toLowerCase();
+      return phrases.some((p) => phrase.includes(p) || p.includes(phrase));
+    })
+    .filter((l) => existingCols.has(`${l.resolvedTable.toUpperCase()}.${l.resolvedColumn.toUpperCase()}`))
+    .sort((a, b) => b.hitCount - a.hitCount)
+    .slice(0, 10);
+  if (matched.length === 0) return '';
+
+  const lines = matched.map(
+    (m) => `- 用户说"${m.userPhrase}" -> ${m.resolvedTable}.${m.resolvedColumn}（采纳 ${m.hitCount} 次）`
+  );
+  return `【历史学习映射】\n${lines.join('\n')}\n规则：优先使用以上映射字段，若当前查询上下文无该字段再退回语义候选。`;
+}
+
+function expandWithRelatedTables(dataSourceId: string, selectedTableNames: string[]): string[] {
+  const rels = getTableRelationshipsByDs(dataSourceId).filter((r) => r.isValid === 1);
+  const expanded = new Set(selectedTableNames.map(tableKey));
+  for (const table of [...expanded]) {
+    for (const rel of rels) {
+      if (tableKey(rel.leftTable) === table) expanded.add(tableKey(rel.rightTable));
+      if (tableKey(rel.rightTable) === table) expanded.add(tableKey(rel.leftTable));
+    }
+  }
+  return [...expanded];
+}
+
 export function searchTables(dataSourceId: string, keywords: string[], limit = 30): SchemaTableSummary[] {
   const tables = getSchemaTables(dataSourceId);
   const heatMap = getTableHeatMap(dataSourceId);
+  const expandedKeywords = expandSemanticKeywords(keywords);
   if (keywords.length === 0) {
     return tables
       .map((t) => ({ t, heat: tableHeatScore(heatMap, t.tableName) }))
@@ -58,7 +176,7 @@ export function searchTables(dataSourceId: string, keywords: string[], limit = 3
     .map((t) => {
       const hay = `${t.tableName} ${t.comments} ${t.columns.map((c) => `${c.name} ${c.comment}`).join(' ')}`.toLowerCase();
       let score = 0;
-      for (const kw of keywords) {
+      for (const kw of expandedKeywords) {
         if (hay.includes(kw.toLowerCase())) score += 1;
       }
       return { t, score, heat: tableHeatScore(heatMap, t.tableName) };
@@ -75,12 +193,19 @@ export function buildSchemaContextForAI(dataSourceId: string, userMessage: strin
     .split(/\s+/)
     .filter((w) => w.length >= 2)
     .slice(0, 8);
+  const allTables = getSchemaTables(dataSourceId);
 
-  const selected = selectedTables.map(tableKey);
+  const selected = expandWithRelatedTables(dataSourceId, selectedTables);
   if (selected.length > 0) {
-    const tables = getSchemaTables(dataSourceId).filter((t) => selected.includes(tableKey(t.tableName)));
+    const tables = allTables.filter((t) => selected.includes(tableKey(t.tableName)));
     if (tables.length > 0) {
-      return formatTablesForPrompt(tables, `用户指定 ${tables.length} 张表，本次报表优先且仅使用这些表`);
+      const semantic = semanticColumnCandidates(allTables, userMessage);
+      const learned = buildLearnedSemanticContext(dataSourceId, userMessage, allTables);
+      return [
+        learned,
+        formatTablesForPrompt(tables, `用户指定 ${tables.length} 张表，本次报表优先且仅使用这些表`, true),
+        semantic,
+      ].filter(Boolean).join('\n\n');
     }
   }
 
@@ -92,7 +217,13 @@ export function buildSchemaContextForAI(dataSourceId: string, userMessage: strin
     }
     return formatTablesForPrompt(all, '未匹配到关键词，以下为部分表结构');
   }
-  return formatTablesForPrompt(tables, `匹配到 ${tables.length} 张相关表`);
+  const semantic = semanticColumnCandidates(allTables, userMessage);
+  const learned = buildLearnedSemanticContext(dataSourceId, userMessage, allTables);
+  return [
+    learned,
+    formatTablesForPrompt(tables, `匹配到 ${tables.length} 张相关表`),
+    semantic,
+  ].filter(Boolean).join('\n\n');
 }
 
 function formatTablesForPrompt(tables: SchemaTableSummary[], header: string, detailed = false): string {

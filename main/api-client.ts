@@ -41,6 +41,8 @@ export interface LogQueryParam {
     value?: string;
     searchValue?: string;
   };
+  filterParamet?: Record<string, any>;
+  sqlId?: string;
 }
 
 // 分析后的日志信息
@@ -50,6 +52,11 @@ export interface AnalyzedLogInfo {
   logLevel: string;
   serviceName: string;
   reqUrl: string;
+  traceId?: string;
+  parentId?: string;
+  spanId?: string;
+  rpcUrl?: string;
+  kind?: string;
   httpMethod?: string;
   httpStatus?: string;
   clientIp?: string;
@@ -73,6 +80,12 @@ export interface AnalyzedLogInfo {
   query?: string;
   params?: string;
   bindParams?: string;
+  className?: string;
+  message?: string;
+  thread?: string;
+  paramName?: string;
+  paramValue?: string;
+  contentHash?: string;
 }
 
 export class ApiClient {
@@ -280,32 +293,39 @@ export class ApiClient {
 
   // 分析单条日志，提取有用信息
   private analyzeLog(log: any): AnalyzedLogInfo {
+    const tags = log.tags || {};
     const result: AnalyzedLogInfo = {
       id: log.id || '',
-      logType: log.logType || '',
+      logType: log.logType || log.idxType || '',
       logLevel: log.logLevel || '',
       serviceName: log.serviceName || '',
-      reqUrl: log.reqUrl || '',
+      reqUrl: log.reqUrl || log.url || log.rpcUrl || '',
       originalLog: log
     };
 
+    result.traceId = log.traceId || tags.traceId || tags['X-B3-TraceId'] || '';
+    result.parentId = log.parentId || tags.parentId || tags['X-B3-ParentSpanId'] || '';
+    result.spanId = log.spanId || log.id || tags.spanId || tags['X-B3-SpanId'] || '';
+    result.rpcUrl = log.rpcUrl || log.url || '';
+    result.kind = log.kind || '';
+
     // 提取HTTP信息
-    if (log.tags) {
-      result.tags = log.tags;
+    if (tags && Object.keys(tags).length > 0) {
+      result.tags = tags;
       
       // 从 tags.http.method 获取请求方法
-      if (log.tags['http.method']) {
-        result.httpMethod = log.tags['http.method'];
+      if (tags['http.method']) {
+        result.httpMethod = tags['http.method'];
       }
       
       // 从 tags.http.statusCode 获取状态码
-      if (log.tags['http.statusCode']) {
-        result.httpStatus = log.tags['http.statusCode'];
+      if (tags['http.statusCode']) {
+        result.httpStatus = tags['http.statusCode'];
       }
       
       // 从 tags.http.header 中查找Vue文件路径
-      if (log.tags['http.header']) {
-        const headers = log.tags['http.header'];
+      if (tags['http.header']) {
+        const headers = tags['http.header'];
         result.vueFile = this.findVueFileInHeaders(headers);
       }
     }
@@ -313,7 +333,7 @@ export class ApiClient {
     // 提取其他信息
     result.clientIp = log.clientIp;
     result.operator = log.operator;
-    result.runTime = log.runTime;
+    result.runTime = log.runTime || log.consume || log.pageConsume;
     
     // 错误信息
     if (log.exClassName) {
@@ -327,7 +347,7 @@ export class ApiClient {
     }
 
     // 请求参数
-    result.requestParams = log.requestParam || log.requestParams || log.params || log.bindParams || '';
+    result.requestParams = log.requestParam || log.requestParams || log.params || log.bindParams || tags['sql.param'] || '';
 
     // SQL日志属性
     if (log.sqlId) {
@@ -336,6 +356,8 @@ export class ApiClient {
     result.sqlContent = log.sqlContent || log.sql || log.statement || log.query || log.sqlStr || '';
     if (log.duration) {
       result.duration = log.duration;
+    } else if (log.runTime || log.consume || log.pageConsume) {
+      result.duration = String(log.runTime || log.consume || log.pageConsume);
     }
     if (log.resultCount) {
       result.resultCount = log.resultCount;
@@ -361,6 +383,13 @@ export class ApiClient {
     if (log.bindParams) {
       result.bindParams = log.bindParams;
     }
+
+    result.className = log.className || tags['mvc.controller.class'] || '';
+    result.message = log.message || '';
+    result.thread = log.thread || '';
+    result.paramName = log.paramName || '';
+    result.paramValue = log.paramValue || '';
+    result.contentHash = log.contentHash || tags['sql.hash'] || '';
 
     return result;
   }

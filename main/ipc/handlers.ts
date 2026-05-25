@@ -57,6 +57,7 @@ import {
   clearReportSession,
   validateSql,
   isReportGenerationAborted,
+  persistVerifiedJoinsFromSql,
 } from '../report';
 
 const reportGenerationAbortControllers = new Map<string, AbortController>();
@@ -383,7 +384,7 @@ export function registerIpcHandlers() {
       });
       bumpTableHeat(dataSourceId, extractTableNamesFromSql(sql), 'query');
 
-      return result;
+      return JSON.parse(JSON.stringify(result));
     } catch (error) {
       console.error('Error executing query:', error);
       throw error;
@@ -776,7 +777,7 @@ export function registerIpcHandlers() {
       });
       bumpTableHeat(dataSourceId, extractTableNamesFromSql(sql), 'query');
 
-      return result;
+      return JSON.parse(JSON.stringify(result));
     } catch (error) {
       console.error('Error executing query:', error);
       throw error;
@@ -938,6 +939,7 @@ export function registerIpcHandlers() {
     resetSession?: boolean;
     selectedTables?: string[];
     contextSql?: string;
+    requestId?: string;
   }) => {
     try {
       const globalConfig = getGlobalConfig();
@@ -970,6 +972,7 @@ export function registerIpcHandlers() {
           (content) => {
             mainWindow.webContents.send('report:streamChunk', {
               sessionKey: params.sessionKey,
+              requestId: params.requestId,
               content,
             });
           },
@@ -1017,7 +1020,13 @@ export function registerIpcHandlers() {
       });
       const result = await session.executeSelect(params.sql);
       bumpTableHeat(params.dataSourceId, extractTableNamesFromSql(params.sql), 'report');
-      return { success: true, ...result };
+      const savedJoins = persistVerifiedJoinsFromSql(
+        params.dataSourceId,
+        params.dbType,
+        params.sql,
+        result.rowCount
+      );
+      return JSON.parse(JSON.stringify({ success: true, ...result, savedJoins }));
     } catch (error) {
       return { success: false, message: (error as Error).message };
     }

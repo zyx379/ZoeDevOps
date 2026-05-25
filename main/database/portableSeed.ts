@@ -15,6 +15,8 @@ export interface PortableSeedPayload {
   projectConfigs?: unknown[][];
   schemaCaches?: { dataSourceId: string; tables: any[]; cachedAt?: string }[];
   tableHeat?: unknown[][];
+  tableRelationships?: unknown[][];
+  semanticFieldLearning?: unknown[][];
 }
 
 export function getPortableSeedPath(): string | undefined {
@@ -111,6 +113,24 @@ export function importPortableSeedIfAvailable(db: SqlJsDatabase, saveDatabase: (
         'table_heat',
         row[0],
         ['id', 'dataSourceId', 'tableName', 'queryCount', 'reportCount', 'manualWeight', 'lastUsedAt', 'createdAt', 'updatedAt'],
+        row
+      );
+    }
+    for (const row of payload.tableRelationships || []) {
+      insertIfMissing(
+        db,
+        'table_relationships',
+        row[0],
+        ['id', 'dataSourceId', 'leftTable', 'leftColumn', 'rightTable', 'rightColumn', 'joinType', 'validationSql', 'isValid', 'verifiedAt', 'createdAt'],
+        row
+      );
+    }
+    for (const row of payload.semanticFieldLearning || []) {
+      insertIfMissing(
+        db,
+        'semantic_field_learning',
+        row[0],
+        ['id', 'dataSourceId', 'userPhrase', 'resolvedTable', 'resolvedColumn', 'hitCount', 'lastUsedAt', 'createdAt'],
         row
       );
     }

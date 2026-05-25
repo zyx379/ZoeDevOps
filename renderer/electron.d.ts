@@ -221,6 +221,7 @@ export interface ElectronAPI {
       resetSession?: boolean;
       selectedTables?: string[];
       contextSql?: string;
+      requestId?: string;
     }) => Promise<{
       success: boolean;
       content?: string;
@@ -258,7 +259,7 @@ export interface ElectronAPI {
       base64: string,
       fileName: string
     ) => Promise<any>;
-    onStreamChunk: (callback: (data: { sessionKey: string; content: string }) => void) => () => void;
+    onStreamChunk: (callback: (data: { sessionKey: string; requestId?: string; content: string }) => void) => () => void;
   };
 }
 

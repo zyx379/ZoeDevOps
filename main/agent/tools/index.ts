@@ -4,6 +4,7 @@ import { queryBusinessData, buildDataQueryPrompt } from './queryBusinessData';
 import { queryMoreLogs, buildMoreLogsPrompt } from './queryMoreLogs';
 import { getTableSchema, buildTableSchemaPrompt } from './getTableSchema';
 import { querySqlLog, buildSqlLogPrompt } from './querySqlLog';
+import { queryTraceLogs, buildTraceLogsPrompt } from './queryTraceLogs';
 import { ToolResult } from '../types';
 import { TOOL_DEFINITIONS } from '../config';
 
@@ -15,6 +16,7 @@ export interface ToolExecutionContext {
   apiTokenPath?: string;
   apiVersionPath?: string;
   logId?: string;
+  dataSourceId?: string;
 }
 
 export async function executeTool(
@@ -26,13 +28,23 @@ export async function executeTool(
 
   switch (toolName) {
     case 'query_log':
-      return queryLog(args, context.projectId, context.apiBaseUrl, context.apiToken, context.apiLogPath, context.apiTokenPath);
+      return queryLog(
+        { ...args, logId: args.logId || args.traceId || context.logId },
+        context.projectId,
+        context.apiBaseUrl,
+        context.apiToken,
+        context.apiLogPath,
+        context.apiTokenPath
+      );
 
     case 'get_code':
       return getCode(args.serviceName, args.filePath, args.branch, args.tag, context.projectId, args.startLine, args.endLine, args.searchPattern);
 
     case 'query_business_data':
-      return queryBusinessData(args.sql, context.projectId, args.description);
+      if (!args.dataSourceId && !context.dataSourceId) {
+        return { success: false, error: '项目未配置数据源，无法查询业务数据' };
+      }
+      return queryBusinessData(args.sql, args.dataSourceId || context.dataSourceId!, args.description);
 
     case 'query_more_logs':
       return queryMoreLogs(
@@ -48,6 +60,36 @@ export async function executeTool(
 
     case 'query_sql_log':
       return querySqlLog(args, context.projectId, context.apiBaseUrl, context.apiToken, context.apiLogPath);
+
+    case 'query_rpc_log':
+      return queryTraceLogs(
+        { ...args, traceId: args.traceId || context.logId },
+        'dubbo',
+        context.projectId,
+        context.apiBaseUrl,
+        context.apiToken,
+        context.apiLogPath
+      );
+
+    case 'query_param_log':
+      return queryTraceLogs(
+        { ...args, traceId: args.traceId || context.logId },
+        'param',
+        context.projectId,
+        context.apiBaseUrl,
+        context.apiToken,
+        context.apiLogPath
+      );
+
+    case 'query_normal_log':
+      return queryTraceLogs(
+        { ...args, traceId: args.traceId || context.logId },
+        'normal',
+        context.projectId,
+        context.apiBaseUrl,
+        context.apiToken,
+        context.apiLogPath
+      );
 
     default:
       return { success: false, error: `未知工具: ${toolName}` };
@@ -81,6 +123,11 @@ export function buildToolPrompt(
 
     case 'query_sql_log':
       return buildSqlLogPrompt(args, result.data);
+
+    case 'query_rpc_log':
+    case 'query_param_log':
+    case 'query_normal_log':
+      return buildTraceLogsPrompt(args, result.data);
 
     default:
       return `工具 ${toolName} 执行成功，返回数据: ${JSON.stringify(result.data, null, 2)}`;

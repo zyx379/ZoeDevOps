@@ -75,11 +75,25 @@ async function main() {
       db,
       "SELECT id, dataSourceId, tableName, queryCount, reportCount, manualWeight, lastUsedAt, createdAt, updatedAt FROM table_heat"
     ),
+    tableRelationships: tableRows(
+      db,
+      "SELECT id, dataSourceId, leftTable, leftColumn, rightTable, rightColumn, joinType, validationSql, isValid, verifiedAt, createdAt FROM table_relationships"
+    ),
+    semanticFieldLearning: tableRows(
+      db,
+      "SELECT id, dataSourceId, userPhrase, resolvedTable, resolvedColumn, hitCount, lastUsedAt, createdAt FROM semantic_field_learning"
+    ),
   };
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(payload), 'utf-8');
   console.log(`Portable seed exported: ${outputPath}`);
+  console.log(`  projects=${payload.projects.length}`);
+  console.log(`  dataSources=${payload.dataSources.length}`);
+  console.log(`  schemaCaches=${payload.schemaCaches.length}`);
+  console.log(`  tableHeat=${payload.tableHeat.length}`);
+  console.log(`  tableRelationships=${payload.tableRelationships.length}`);
+  console.log(`  semanticFieldLearning=${payload.semanticFieldLearning.length}`);
 }
 
 main().catch((error) => {

@@ -5,12 +5,15 @@ import { buildSchemaContextForAI, buildSchemaContextForSqlOptimize } from './sch
 import {
   getTableRelationshipsByDs,
   findRelationship,
-  saveTableRelationship,
+  saveSemanticFieldLearning,
 } from '../database/reportStorage';
+import { persistVerifiedJoinsFromSql } from './joinExtractor';
 import { executeOracleQuery } from '../database/oracle';
 import { executeDamengQuery } from '../database/dameng';
 import { validateSql, ensureRowLimit } from './sqlValidator';
+import { validateSqlAgainstSchema } from './sqlSchemaValidator';
 import { fetchExplainPlan } from './sqlExplain';
+import { generateRelationPlan } from './relationPlanner';
 import {
   extractSqlFromText,
   isSqlOptimizationRequest,
@@ -51,15 +54,21 @@ export const REPORT_SYSTEM_PROMPT = `你是 HIS 数据报表助手，帮助运�
 1. 只生成 SELECT 语句，禁止 INSERT/UPDATE/DELETE/DROP/ALTER 等
 2. 必须限制行数：Oracle 用 WHERE ROWNUM <= 500（或子查询外包一层再加 ROWNUM）；达梦用 SELECT TOP 500
 3. 表名、列名必须逐字来自提供的 Schema，禁止编造、禁止猜测缩写
-4. 多表 JOIN 时必须写表别名，关联列优先使用「已验证表关系」
-5. 时间条件：Oracle 用 TO_DATE('yyyy-mm-dd','YYYY-MM-DD')；达梦日期用 CAST 或 TO_DATE，与列类型匹配
-6. 字符串字面量用单引号；LIKE 模糊查询注意转义；IN 列表元素均需引号包裹
-7. 聚合查询中，SELECT 的非聚合列必须出现在 GROUP BY 中
-8. 不确定时间范围、候选表时，先向用户确认，不要输出 SQL
-9. 生成 SQL 时：只输出一条完整可执行语句，放在单个 \`\`\`sql 代码块中，块内不要夹杂解释文字；SQL 再长也必须完整输出，禁止用省略号或「同上」截断
-10. 若用户反馈 SQL 执行报错，必须根据错误信息修正后重新输出完整 SQL，不要只给片段
-11. 若用户仅要求换图表类型，回复 JSON：\`\`\`report-action\n{"action":"chart_only","chartType":"line|bar|pie|table"}\n\`\`\`
-12. 报表标题放在首行，格式：# 标题
+4. 用户说“手机号/电话/联系方式”等语义词时，要在 Schema 和「语义字段候选」中寻找 PHONE、MOBILE、TEL、CONTACT_PHONE 等真实存在字段；只能使用候选或 Schema 中确实存在的列
+5. 生成 SQL 前必须自检每一个 别名.字段 是否存在于对应表；不存在就换用真实字段或先向用户确认，严禁输出不存在字段
+6. 多表 JOIN 时必须写表别名，关联列优先使用「已验证表关系」
+7. 时间条件：Oracle 用 TO_DATE('yyyy-mm-dd','YYYY-MM-DD')；达梦日期用 CAST 或 TO_DATE，与列类型匹配
+8. 字符串字面量用单引号；LIKE 模糊查询注意转义；IN 列表元素均需引号包裹
+9. 聚合查询中，SELECT 的非聚合列必须出现在 GROUP BY 中
+10. 不确定时间范围、候选表时，先向用户确认，不要输出 SQL
+11. 生成 SQL 时：只输出一条完整可执行语句，放在单个 \`\`\`sql 代码块中，块内不要夹杂解释文字；SQL 再长也必须完整输出，禁止用省略号或「同上」截断
+12. 若用户反馈 SQL 执行报错，必须根据错误信息修正后重新输出完整 SQL，不要只给片段
+13. 若用户仅要求换图表类型，回复 JSON：\`\`\`report-action\n{"action":"chart_only","chartType":"line|bar|pie|table"}\n\`\`\`
+14. 报表标题放在首行，格式：# 标题
+15. 输出顺序规则：
+   - 用户明确要求排序时，严格按用户要求
+   - 用户未指定排序时：时间类查询默认按时间字段 DESC；汇总统计默认按数值 DESC；明细默认按主键/业务ID ASC
+   - 除用户明确说明“无需排序”，否则 SQL 必须包含 ORDER BY
 
 回复使用中文。`;
 
@@ -78,6 +87,49 @@ const REPORT_MAX_TOKENS = 8192;
 
 function extractSqlFromMarkdown(content: string): string | null {
   return extractSqlFromText(content);
+}
+
+function extractBusinessPhrases(userMessage: string): string[] {
+  const stopwords = new Set([
+    '查询', '统计', '看看', '帮我', '一下', '数据', '信息', '明细', '列表', '按', '并且', '以及',
+    '今天', '昨天', '本周', '本月', '这个', '那个', '请', '给我', '展示',
+  ]);
+  return Array.from(
+    new Set(
+      userMessage
+        .toLowerCase()
+        .replace(/[^\u4e00-\u9fa5a-z0-9_\s]/gi, ' ')
+        .split(/[\s,，。！？!?:：;；、()（）"'`]+/)
+        .map((x) => x.trim())
+        .filter((x) => x.length >= 2 && !stopwords.has(x))
+    )
+  ).slice(0, 20);
+}
+
+function extractQualifiedColumns(sql: string): Array<{ tableAlias: string; column: string }> {
+  const rows: Array<{ tableAlias: string; column: string }> = [];
+  const re = /(?<!:)\b(?:"([^"]+)"|([A-Z][A-Z0-9_$]*))\s*\.\s*(?:"([^"]+)"|([A-Z][A-Z0-9_$]*))\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sql)) !== null) {
+    rows.push({
+      tableAlias: (m[1] || m[2] || '').replace(/"/g, '').toUpperCase(),
+      column: (m[3] || m[4] || '').replace(/"/g, '').toUpperCase(),
+    });
+  }
+  return rows;
+}
+
+function parseAliasTableMap(sql: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const re = /\b(?:FROM|JOIN)\s+((?:"[^"]+"|[A-Z0-9_$]+)(?:\.(?:"[^"]+"|[A-Z0-9_$]+))?)(?:\s+(?:AS\s+)?(?!(?:ON|WHERE|INNER|LEFT|RIGHT|FULL|CROSS|JOIN|GROUP|ORDER|HAVING|UNION)\b)(?:"([^"]+)"|([A-Z][A-Z0-9_$]*)))?/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sql)) !== null) {
+    const table = (m[1] || '').replace(/"/g, '').toUpperCase();
+    const alias = (m[2] || m[3] || table.split('.').pop() || table).replace(/"/g, '').toUpperCase();
+    map.set(alias, table);
+    map.set(table, table);
+  }
+  return map;
 }
 
 export class ReportGenerationAbortedError extends Error {
@@ -143,6 +195,63 @@ export class ReportSession {
     );
   }
 
+  private async planAndEnsureRelationships(
+    userMessage: string,
+    schemaCtx: string,
+    rels: ReturnType<typeof getTableRelationshipsByDs>,
+    abortSignal?: AbortSignal
+  ): Promise<string> {
+    const baseMessages: ConversationMessage[] = [
+      { role: 'system', content: `数据库类型: ${this.context.dbType}\n\n${schemaCtx}` },
+      ...this.conversation.slice(-6),
+    ];
+    const plan = await generateRelationPlan(this.client, baseMessages, userMessage, abortSignal);
+    if (!plan || plan.joins.length === 0) {
+      return rels.length > 0
+        ? `【强制可用关联】以下表关系已通过查询验证，生成 JOIN 时必须优先使用：\n${rels
+            .map((r) => `- ${r.leftTable}.${r.leftColumn} = ${r.rightTable}.${r.rightColumn} (${r.joinType})`)
+            .join('\n')}`
+        : '【已验证表关系】暂无';
+    }
+
+    const existing = new Map<string, typeof rels[number]>();
+    for (const r of rels) {
+      const k = [r.leftTable, r.rightTable].sort().join('::');
+      existing.set(k, r);
+    }
+
+    const sessionCandidates: Array<{ left: string; leftColumn: string; right: string; rightColumn: string }> = [];
+    for (const join of plan.joins) {
+      const key = [join.left, join.right].sort().join('::');
+      if (existing.has(key)) continue;
+      const check = await this.validateJoin(join.left, join.leftColumn, join.right, join.rightColumn);
+      if (check.success) {
+        sessionCandidates.push(join);
+      }
+    }
+
+    const verifiedLines = Array.from(existing.values()).map(
+      (r) => `- ${r.leftTable}.${r.leftColumn} = ${r.rightTable}.${r.rightColumn} (${r.joinType})`
+    );
+    const candidateLines = sessionCandidates.map(
+      (j) => `- ${j.left}.${j.leftColumn} = ${j.right}.${j.rightColumn}（语法验证通过，待查询确认）`
+    );
+
+    const blocks: string[] = [];
+    if (verifiedLines.length > 0) {
+      blocks.push(
+        `【强制可用关联】以下表关系已通过查询验证，生成 JOIN 时必须优先使用：\n${verifiedLines.join('\n')}`
+      );
+    }
+    if (candidateLines.length > 0) {
+      blocks.push(
+        `【本轮候选关联】以下关联仅通过语法验证，可优先尝试；若最终 SQL 执行无数据则不应采用：\n${candidateLines.join('\n')}`
+      );
+    }
+    if (blocks.length === 0) return '【已验证表关系】暂无';
+    return blocks.join('\n\n');
+  }
+
   async sendMessage(
     userMessage: string,
     onChunk: (content: string) => void,
@@ -164,11 +273,7 @@ export class ReportSession {
       : buildSchemaContextForAI(this.context.dataSourceId, userMessage, selectedTables);
 
     const rels = getTableRelationshipsByDs(this.context.dataSourceId).filter((r) => r.isValid === 1);
-    const relText =
-      rels.length > 0
-        ? '【已验证表关系】\n' +
-          rels.map((r) => `- ${r.leftTable}.${r.leftColumn} = ${r.rightTable}.${r.rightColumn} (${r.joinType})`).join('\n')
-        : '【已验证表关系】暂无';
+    const relText = await this.planAndEnsureRelationships(userMessage, schemaCtx, rels, abortSignal);
 
     let explainBlock = '';
     if (optimizeMode && sqlForContext) {
@@ -322,7 +427,15 @@ export class ReportSession {
   ): Promise<string> {
     throwIfAborted(abortSignal);
     try {
-      await this.executeSelect(sql);
+      const schemaValidation = validateSqlAgainstSchema(this.context.dataSourceId, sql);
+      if (!schemaValidation.valid) {
+        throw new Error(schemaValidation.reason || 'SQL 字段校验失败');
+      }
+      const execResult = await this.executeSelect(sql);
+      if (execResult.rowCount > 0) {
+        persistVerifiedJoinsFromSql(this.context.dataSourceId, this.context.dbType, sql, execResult.rowCount);
+      }
+      this.learnSemanticMappings(this.context.dataSourceId, this.conversation[this.conversation.length - 1]?.content || '', sql);
       return assistantContent;
     } catch (e) {
       if (isReportGenerationAborted(e)) throw e;
@@ -422,18 +535,10 @@ export class ReportSession {
       }
 
       if (rowCount >= 0) {
-        saveTableRelationship({
-          dataSourceId: this.context.dataSourceId,
-          leftTable,
-          leftColumn,
-          rightTable,
-          rightColumn,
-          joinType: 'INNER',
-          validationSql,
-          isValid: 1,
-          verifiedAt: new Date().toISOString(),
-        });
-        return { success: true, message: '表关系验证通过并已缓存' };
+        return {
+          success: true,
+          message: '表关系语法验证通过（待查询有数据后自动保存）',
+        };
       }
       return { success: false, message: '验证查询无结果' };
     } catch (e) {
@@ -453,6 +558,11 @@ export class ReportSession {
     const validation = validateSql(sql, 'select_only');
     if (!validation.valid) {
       throw new Error(validation.reason || 'SQL 校验失败');
+    }
+
+    const schemaValidation = validateSqlAgainstSchema(this.context.dataSourceId, validation.normalizedSql!);
+    if (!schemaValidation.valid) {
+      throw new Error(schemaValidation.reason || 'SQL 字段校验失败');
     }
 
     const limitedSql = ensureRowLimit(validation.normalizedSql!, ds.type);
@@ -480,6 +590,41 @@ export class ReportSession {
       },
       limitedSql
     );
+  }
+
+  private learnSemanticMappings(dataSourceId: string, userMessage: string, sql: string): void {
+    const phrases = extractBusinessPhrases(userMessage);
+    if (phrases.length === 0) return;
+    const aliasTable = parseAliasTableMap(sql);
+    const refs = extractQualifiedColumns(sql);
+    if (refs.length === 0) return;
+
+    const candidates = refs
+      .map((r) => ({
+        table: aliasTable.get(r.tableAlias) || r.tableAlias,
+        column: r.column,
+      }))
+      .filter((x) => !!x.table && !!x.column);
+    if (candidates.length === 0) return;
+
+    for (const phrase of phrases) {
+      const scored = candidates
+        .map((c) => {
+          const n = c.column.toLowerCase();
+          let score = 0;
+          if (n.includes('phone') || n.includes('mobile') || n.includes('tel') || n.includes('lxdh') || n.includes('sjh')) {
+            if (phrase.includes('电话') || phrase.includes('手机') || phrase.includes('联系方式') || phrase.includes('手机号')) {
+              score += 5;
+            }
+          }
+          if (n.includes(phrase)) score += 3;
+          return { ...c, score };
+        })
+        .sort((a, b) => b.score - a.score);
+      if (scored[0]?.score > 0) {
+        saveSemanticFieldLearning(dataSourceId, phrase, scored[0].table, scored[0].column, 1);
+      }
+    }
   }
 }
 

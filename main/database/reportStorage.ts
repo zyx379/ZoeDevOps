@@ -55,6 +55,17 @@ export interface TableHeatRecord {
   updatedAt: string;
 }
 
+export interface SemanticFieldLearningRecord {
+  id: string;
+  dataSourceId: string;
+  userPhrase: string;
+  resolvedTable: string;
+  resolvedColumn: string;
+  hitCount: number;
+  lastUsedAt: string;
+  createdAt: string;
+}
+
 export function initReportTables(): void {
   const db = getDb();
   db.run(`
@@ -121,6 +132,23 @@ export function initReportTables(): void {
   `);
   db.run(`
     CREATE INDEX IF NOT EXISTS idx_table_heat_ds ON table_heat(dataSourceId)
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS semantic_field_learning (
+      id TEXT PRIMARY KEY,
+      dataSourceId TEXT NOT NULL,
+      userPhrase TEXT NOT NULL,
+      resolvedTable TEXT NOT NULL,
+      resolvedColumn TEXT NOT NULL,
+      hitCount INTEGER DEFAULT 1,
+      lastUsedAt TEXT,
+      createdAt TEXT NOT NULL,
+      UNIQUE(dataSourceId, userPhrase, resolvedTable, resolvedColumn)
+    )
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_semantic_learning_ds_phrase
+    ON semantic_field_learning(dataSourceId, userPhrase)
   `);
   saveDatabase();
 }
@@ -409,6 +437,38 @@ export function bumpTableHeat(
   saveDatabase();
 }
 
+/** 写入或提升 manualWeight（不降低已有权重，不影响 queryCount/reportCount） */
+export function upsertTableHeatManualWeight(
+  dataSourceId: string,
+  tableName: string,
+  manualWeight: number
+): void {
+  if (!tableName.trim() || manualWeight <= 0) return;
+
+  const db = getDb();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(
+    `SELECT id, manualWeight, queryCount, reportCount, createdAt
+     FROM table_heat
+     WHERE dataSourceId = ? AND UPPER(tableName) = UPPER(?)`
+  );
+  stmt.bind([dataSourceId, tableName]);
+  if (stmt.step()) {
+    const row = stmt.get();
+    stmt.free();
+    const nextWeight = Math.max(Number(row[1] || 0), manualWeight);
+    db.run(`UPDATE table_heat SET manualWeight = ?, updatedAt = ? WHERE id = ?`, [nextWeight, now, row[0]]);
+  } else {
+    stmt.free();
+    db.run(
+      `INSERT INTO table_heat (id, dataSourceId, tableName, queryCount, reportCount, manualWeight, lastUsedAt, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), dataSourceId, tableName, 0, 0, manualWeight, '', now, now]
+    );
+  }
+  saveDatabase();
+}
+
 export function deleteTableHeat(id: string): void {
   getDb().run('DELETE FROM table_heat WHERE id = ?', [id]);
   saveDatabase();
@@ -416,5 +476,80 @@ export function deleteTableHeat(id: string): void {
 
 export function clearTableHeat(dataSourceId: string): void {
   getDb().run('DELETE FROM table_heat WHERE dataSourceId = ?', [dataSourceId]);
+  saveDatabase();
+}
+
+function rowToSemanticRecord(row: unknown[]): SemanticFieldLearningRecord {
+  return {
+    id: row[0] as string,
+    dataSourceId: row[1] as string,
+    userPhrase: row[2] as string,
+    resolvedTable: row[3] as string,
+    resolvedColumn: row[4] as string,
+    hitCount: Number(row[5] || 1),
+    lastUsedAt: (row[6] as string) || '',
+    createdAt: row[7] as string,
+  };
+}
+
+export function getSemanticFieldLearning(
+  dataSourceId: string,
+  limit = 200
+): SemanticFieldLearningRecord[] {
+  const db = getDb();
+  const stmt = db.prepare(
+    `SELECT id, dataSourceId, userPhrase, resolvedTable, resolvedColumn, hitCount, lastUsedAt, createdAt
+     FROM semantic_field_learning
+     WHERE dataSourceId = ?
+     ORDER BY hitCount DESC, lastUsedAt DESC
+     LIMIT ?`
+  );
+  stmt.bind([dataSourceId, limit]);
+  const rows: SemanticFieldLearningRecord[] = [];
+  while (stmt.step()) {
+    rows.push(rowToSemanticRecord(stmt.get()));
+  }
+  stmt.free();
+  return rows;
+}
+
+export function saveSemanticFieldLearning(
+  dataSourceId: string,
+  userPhrase: string,
+  resolvedTable: string,
+  resolvedColumn: string,
+  weight = 1
+): void {
+  const phrase = userPhrase.trim();
+  if (!phrase) return;
+  const table = resolvedTable.trim().toUpperCase();
+  const column = resolvedColumn.trim().toUpperCase();
+  if (!table || !column) return;
+
+  const db = getDb();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(
+    `SELECT id, hitCount FROM semantic_field_learning
+     WHERE dataSourceId = ? AND userPhrase = ? AND resolvedTable = ? AND resolvedColumn = ?`
+  );
+  stmt.bind([dataSourceId, phrase, table, column]);
+  if (stmt.step()) {
+    const row = stmt.get();
+    stmt.free();
+    db.run(
+      `UPDATE semantic_field_learning
+       SET hitCount = ?, lastUsedAt = ?
+       WHERE id = ?`,
+      [Number(row[1] || 1) + Math.max(1, weight), now, row[0]]
+    );
+  } else {
+    stmt.free();
+    db.run(
+      `INSERT INTO semantic_field_learning
+       (id, dataSourceId, userPhrase, resolvedTable, resolvedColumn, hitCount, lastUsedAt, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), dataSourceId, phrase, table, column, Math.max(1, weight), now, now]
+    );
+  }
   saveDatabase();
 }

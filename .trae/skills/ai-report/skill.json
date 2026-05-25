@@ -1,0 +1,16 @@
+{
+  "name": "ai-report",
+  "description": "AI智能报表助手，支持自然语言生成SQL、数据分析和可视化",
+  "version": "1.0.0",
+  "author": "zoe-devops",
+  "tags": ["报表", "数据分析", "SQL生成", "可视化"],
+  "tools": [
+    "query_business_data",
+    "get_table_schema",
+    "generate_sql",
+    "explain_sql",
+    "validate_sql"
+  ],
+  "prompt_file": "prompt.md",
+  "examples_dir": "examples"
+}

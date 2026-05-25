@@ -1,6 +1,5 @@
-import { ApiClient, LogQueryParam } from '../../api-client';
-import { getProjectConfig } from '../../database/sqlite';
 import { ToolResult } from '../types';
+import { buildSqlLogQuery, createLogApiClient, summarizeEvidence } from './logUtils';
 
 export async function querySqlLog(
   args: { traceId: string; sqlId?: string; keyword?: string },
@@ -10,57 +9,34 @@ export async function querySqlLog(
   apiLogPath?: string
 ): Promise<ToolResult> {
   try {
-    let configToUse: { baseUrl: string; logPath?: string } | undefined;
-    let tokenToUse: string | undefined;
-
-    if (apiBaseUrl && apiLogPath) {
-      configToUse = { baseUrl: apiBaseUrl, logPath: apiLogPath };
-      tokenToUse = apiToken;
-    } else {
-      const projectConfig = getProjectConfig(projectId);
-      if (projectConfig && projectConfig.apiBaseUrl && projectConfig.apiLogPath) {
-        configToUse = {
-          baseUrl: projectConfig.apiBaseUrl,
-          logPath: projectConfig.apiLogPath,
-        };
-      }
-    }
-
-    if (!configToUse) {
+    const apiClient = await createLogApiClient({ projectId, apiBaseUrl, apiToken, apiLogPath });
+    if (!apiClient) {
       return { success: false, error: '项目未配置 API，无法查询 SQL 日志' };
     }
 
-    const apiClient = new ApiClient(configToUse);
-    if (tokenToUse) {
-      apiClient.setToken(tokenToUse);
-    }
-
-    const searchValue = args.sqlId || args.keyword || args.traceId;
-
-    const queryParam: LogQueryParam = {
-      pageSize: '30',
-      pageNum: '1',
-      indexvalue: 'log-sql*',
-      logType: 'sql',
-      serviceName: '',
-      canary: '',
+    const queryParam = buildSqlLogQuery({
       traceId: args.traceId,
-      logLevel: [],
-      timestamp: { startDate: null, endDate: null },
-      filterParam: {
-        searchType: '2',
-        termChecked: !!args.sqlId,
-        matchChecked: !args.sqlId,
-        wildcardChecked: false,
-        operator: args.sqlId ? 'AND' : '',
-        value: args.sqlId || '',
-        searchValue: searchValue
-      }
-    };
+      sqlId: args.sqlId,
+    });
 
     console.log('querySqlLog queryParam:', JSON.stringify(queryParam, null, 2));
 
-    const result = await apiClient.getLogs(queryParam);
+    let result = await apiClient.getLogs(queryParam);
+
+    // 精确 sqlId 无结果时，回退为仅 traceId 查询并在客户端按方法名模糊匹配
+    if (result.logs.length === 0 && args.sqlId) {
+      const fallbackParam = buildSqlLogQuery({ traceId: args.traceId });
+      console.log('querySqlLog fallback queryParam:', JSON.stringify(fallbackParam, null, 2));
+      const fallbackResult = await apiClient.getLogs(fallbackParam);
+      const needle = args.sqlId.toLowerCase();
+      const matched = fallbackResult.logs.filter(log => {
+        const sqlId = (log.sqlId || log.originalLog?.sqlId || '').toLowerCase();
+        return sqlId.includes(needle) || needle.includes(sqlId.split('.').pop() || '');
+      });
+      if (matched.length > 0) {
+        result = { total: matched.length, logs: matched };
+      }
+    }
 
     if (result.logs.length === 0) {
       return {
@@ -79,6 +55,8 @@ export async function querySqlLog(
       resultCount: log.resultCount || '',
       tableName: log.tableName || '',
       timestamp: log.timestamp || '',
+      errorClass: log.errorClass || '',
+      errorMessage: log.errorMessage || '',
     }));
 
     return {
@@ -88,6 +66,7 @@ export async function querySqlLog(
         sqlId: args.sqlId || '',
         totalCount: sqlLogs.length,
         sqlLogs,
+        evidence: summarizeEvidence(result.logs, 15),
       }
     };
   } catch (error) {

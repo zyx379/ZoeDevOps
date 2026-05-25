@@ -2112,6 +2112,31 @@ function AnalysisPage() {
                     {step.content}
                   </div>
                 )}
+                {step.id === 'deep_analysis' && Array.isArray(step.data?.toolRuns) && step.data.toolRuns.length > 0 && (
+                  <div className="mt-4 border-t border-gray-100 pt-4">
+                    <div className="text-xs font-semibold text-gray-500 mb-2">工具调用明细</div>
+                    <div className="space-y-2">
+                      {step.data.toolRuns.map((toolRun: any, index: number) => (
+                        <div key={`${toolRun.name}-${index}`} className="rounded-md bg-gray-50 border border-gray-100 p-3 text-xs">
+                          <div className="flex items-center justify-between gap-3 mb-1">
+                            <span className="font-mono text-gray-700">{toolRun.name}</span>
+                            <span className={toolRun.success ? 'text-green-600' : 'text-red-600'}>
+                              {toolRun.success ? '成功' : '失败'}
+                            </span>
+                          </div>
+                          <div className="text-gray-500 break-all">
+                            参数：{JSON.stringify(toolRun.arguments || {})}
+                          </div>
+                          {toolRun.summary && (
+                            <div className="mt-2 text-gray-600 whitespace-pre-wrap max-h-24 overflow-y-auto">
+                              {toolRun.summary}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {!step.content && !step.error && (
                   <p className="text-gray-400 text-sm">无输出内容</p>
                 )}

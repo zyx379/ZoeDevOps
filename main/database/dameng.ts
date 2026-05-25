@@ -294,6 +294,19 @@ export async function getDamengTables(
   }
 }
 
+function serializeRowValue(value: any): any {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString('base64');
+  }
+  return value;
+}
+
 export async function executeDamengQuery(
   params: DamengConnectionParams,
   sql: string
@@ -314,7 +327,8 @@ export async function executeDamengQuery(
     const executionTime = Date.now() - startTime;
 
     const columns = result.metaData ? result.metaData.map((col: any) => col.name) : [];
-    const rows = result.rows || [];
+    const rawRows = result.rows || [];
+    const rows = rawRows.map((row: any[]) => row.map(serializeRowValue));
     const rowCount = rows.length;
 
     conn.close();

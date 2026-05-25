@@ -35,3 +35,6 @@ coverage/
 # 缓存
 .cache/
 *.tmp
+
+# 安装包种子数据（含数据源密码等敏感信息，打包前由 seed:export 生成）
+resources/seed/portable-seed.json
